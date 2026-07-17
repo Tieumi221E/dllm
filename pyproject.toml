@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dllm"
+version = "1.0.0"
+description = "Self-contained LLaDA-style masked diffusion LM toolkit: training, inference, evaluation, RL utilities"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = ["torch>=2.0"]
+
+[project.optional-dependencies]
+hf = ["transformers>=4.38"]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["dllm*"]
