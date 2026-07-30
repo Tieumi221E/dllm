@@ -22,6 +22,7 @@ from typing import List, Optional, Sequence
 import torch
 
 from ..models.transformer import DiffusionTransformer
+from ..topology import AttentionTopology
 from .utils import (
     confidence_scores,
     get_num_transfer_tokens,
@@ -66,12 +67,11 @@ def block_causal_bias(
     Also useful in training loops to make truncated-canvas block SFT exactly
     cache-consistent.
     """
-    bounds = torch.as_tensor(list(boundaries), device=device)
-    pos = torch.arange(length, device=device)
-    seg = torch.searchsorted(bounds, pos, right=True)  # segment index
-    allow = seg.unsqueeze(1) >= seg.unsqueeze(0)  # row >= col
+    allow = AttentionTopology.from_boundaries(
+        boundaries, length, device=device
+    ).attention_mask()
     bias = torch.zeros(1, 1, length, length, dtype=dtype, device=device)
-    return bias.masked_fill(~allow.unsqueeze(0).unsqueeze(0), torch.finfo(dtype).min)
+    return bias.masked_fill(~allow, torch.finfo(dtype).min)
 
 
 @dataclass

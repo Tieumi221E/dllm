@@ -19,6 +19,8 @@ except ImportError as e:  # pragma: no cover
     raise ImportError("dllm.models.hf requires `transformers`") from e
 
 from .transformer import DiffusionTransformer
+from .protocol import DenoiserInput, DenoiserOutput
+from ..topology import AttentionTopology
 
 
 class DiffusionLMOutput(NamedTuple):
@@ -69,6 +71,7 @@ class DiffusionConfig(PretrainedConfig):
 
 class DiffusionTransformerLM(PreTrainedModel):
     config_class = DiffusionConfig
+    capabilities = DiffusionTransformer.capabilities
 
     def __init__(self, config: DiffusionConfig):
         super().__init__(config)
@@ -94,7 +97,17 @@ class DiffusionTransformerLM(PreTrainedModel):
         self,
         input_ids: torch.LongTensor,
         attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        topology: Optional[AttentionTopology] = None,
         **kwargs,
     ) -> DiffusionLMOutput:
-        logits = self.model(input_ids, attention_mask=attention_mask)
+        logits = self.model(
+            input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            topology=topology,
+        )
         return DiffusionLMOutput(logits=logits)
+
+    def denoise(self, request: DenoiserInput) -> DenoiserOutput:
+        return self.model.denoise(request)

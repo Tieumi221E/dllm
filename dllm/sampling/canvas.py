@@ -26,6 +26,8 @@ from typing import List, Optional, Sequence
 import torch
 import torch.nn.functional as F
 
+from ..execution import CacheSemantics
+from ..models.protocol import extract_logits
 from ..models.transformer import DiffusionTransformer, KVCache
 from .trace import (
     TokenDistribution,
@@ -86,7 +88,7 @@ def _model_logits(model, ids, attention_mask=None):
         if attention_mask is None
         else model(ids, attention_mask=attention_mask)
     )
-    return out.logits if hasattr(out, "logits") else out
+    return extract_logits(out)
 
 
 @torch.no_grad()
@@ -210,6 +212,16 @@ def generate_canvas(
                     cache = KVCache(
                         kvs=[(k[:, :, :s], v[:, :, :s]) for k, v in kvs],
                         key_mask=None if full_attn is None else full_attn[:, :s].bool(),
+                        position_ids=torch.arange(s, device=x.device)
+                        .unsqueeze(0)
+                        .expand(x.shape[0], -1),
+                        group_ids=torch.zeros(
+                            x.shape[0], s, dtype=torch.long, device=x.device
+                        ),
+                        semantics=CacheSemantics.approximate_for(
+                            "bidirectional_canvas",
+                            "prefix states are frozen while the active window changes",
+                        ),
                     )
                     logits = logits_full
                     lo = 0  # logits indexed over full canvas

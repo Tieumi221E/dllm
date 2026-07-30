@@ -19,9 +19,12 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from dllm import (
+    AttentionTopology,
     BlockSFTCollator,
     BlockwiseConfig,
     CanvasConfig,
+    DenoiserInput,
+    DenoiserOutput,
     DiffusionTransformer,
     LinearSchedule,
     PretrainCollator,
@@ -34,9 +37,11 @@ from dllm import (
     masked_cross_entropy,
     mc_conditional_nll,
     ppo_clip_objective,
+    extract_logits,
     trajectory_logprobs,
     trajectory_states,
 )
+from dllm.sampling import block_causal_bias
 from dllm.sampling.utils import get_num_transfer_tokens, split_steps
 
 torch.manual_seed(0)
@@ -225,6 +230,52 @@ def test_position_overflow_raises():
     raise AssertionError("expected ValueError for overlong sequence")
 
 
+def test_ordered_topologies_match_explicit_masks():
+    model = tiny_model(pos="rope")
+    ids = torch.randint(0, V, (2, 12))
+
+    causal = AttentionTopology.causal(batch_size=2, length=12)
+    explicit_causal = torch.ones(12, 12, dtype=torch.bool).tril()[None, None]
+    actual = model(ids, topology=causal)
+    expected = model(ids, attn_bias=explicit_causal)
+    assert torch.allclose(actual, expected, atol=1e-5)
+
+    boundaries = [4, 9, 12]
+    block_topology = AttentionTopology.from_boundaries(
+        boundaries, 12, batch_size=2
+    )
+    actual = model(ids, topology=block_topology)
+    expected = model(ids, attn_bias=block_causal_bias(boundaries, 12, ids.device))
+    assert torch.allclose(actual, expected, atol=1e-5)
+
+
+def test_padding_does_not_change_valid_logits():
+    for pos in ("learned", "rope"):
+        model = tiny_model(pos=pos)
+        rows = torch.randint(0, V, (2, 8))
+        valid = torch.ones(2, 8, dtype=torch.bool)
+        valid[0, 5:] = False
+        batched = model(rows, attention_mask=valid)
+        compact0 = model(rows[0:1, :5])
+        compact1 = model(rows[1:2])
+        assert torch.allclose(batched[0, :5], compact0[0], atol=1e-5), pos
+        assert torch.allclose(batched[1], compact1[0], atol=1e-5), pos
+
+
+def test_explicit_positions_decouple_padding_from_columns():
+    for pos in ("learned", "rope"):
+        model = tiny_model(pos=pos)
+        real = torch.randint(0, V, (1, 6))
+        compact = model(real)
+        padded = torch.cat([torch.randint(0, V, (1, 3)), real], dim=1)
+        valid = torch.tensor([[0, 0, 0, 1, 1, 1, 1, 1, 1]], dtype=torch.bool)
+        position_ids = torch.tensor([[0, 0, 0, 0, 1, 2, 3, 4, 5]])
+        actual = model(
+            padded, attention_mask=valid, position_ids=position_ids
+        )
+        assert torch.allclose(actual[:, 3:], compact, atol=1e-5), pos
+
+
 def test_kv_cache_exactness():
     """cache path == full forward under explicit block-causal bias."""
     for pos in ("learned", "rope"):
@@ -243,6 +294,27 @@ def test_kv_cache_exactness():
         assert torch.allclose(blk_logits, ref[:, Lp:, :], atol=1e-4), pos
 
 
+def test_cache_matches_multiblock_topology_recomputation():
+    for pos in ("learned", "rope"):
+        model = tiny_model(pos=pos)
+        prefix = torch.randint(0, V, (2, 5))
+        block1 = torch.randint(0, V, (2, 4))
+        block2 = torch.randint(0, V, (2, 3))
+
+        cache = model.build_kv_cache(prefix)
+        out1 = model.forward_block(block1, cache, return_dict=True)
+        assert isinstance(out1, DenoiserOutput) and out1.cache is not None
+        out2 = model.forward_block(block2, out1.cache, return_dict=True)
+
+        full = torch.cat([prefix, block1, block2], dim=1)
+        groups = torch.tensor([[0] * 5 + [1] * 4 + [2] * 3]).expand(2, -1)
+        topology = AttentionTopology(groups)
+        expected = model(full, topology=topology)[:, -3:]
+        assert torch.allclose(out2.logits, expected, atol=1e-4), pos
+        assert out2.cache.semantics.exact
+        assert out2.cache.semantics.topology == "block_causal"
+
+
 def test_kv_cache_extend_and_mask():
     model = tiny_model()
     prefix = torch.randint(0, V, (2, 6))
@@ -256,6 +328,36 @@ def test_kv_cache_extend_and_mask():
     b2 = torch.randint(0, V, (2, 4))
     logits2, _ = model.forward_block(b2, cache2)
     assert logits2.shape == (2, 4, V)
+
+
+def test_denoiser_protocol_and_structured_output():
+    model = tiny_model()
+    ids = torch.randint(0, V, (2, 7))
+    topology = AttentionTopology.bidirectional(batch_size=2, length=7)
+    output = model.denoise(
+        DenoiserInput(input_ids=ids, topology=topology, use_cache=True)
+    )
+    assert isinstance(output, DenoiserOutput)
+    assert output.cache is not None and output.cache.length == 7
+    assert torch.allclose(extract_logits(output), model(ids), atol=1e-6)
+
+    embeddings = model.token_emb(ids)
+    embedded_output = model.denoise(
+        DenoiserInput(inputs_embeds=embeddings, topology=topology)
+    )
+    assert torch.allclose(embedded_output.logits, model(ids), atol=1e-6)
+
+
+def test_gradient_checkpointing_preserves_all_layer_gradients():
+    model = tiny_model(pos="rope")
+    model.gradient_checkpointing = True
+    model.train()
+    ids = torch.randint(0, V, (2, 9))
+    topology = AttentionTopology.causal(batch_size=2, length=9)
+    model(ids, topology=topology).float().square().mean().backward()
+    for layer in model.layers:
+        grad = layer.attn.q_proj.weight.grad
+        assert grad is not None and torch.isfinite(grad).all()
 
 
 # -------------------------------- sampling --------------------------------- #
