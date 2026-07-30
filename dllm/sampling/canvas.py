@@ -27,7 +27,12 @@ import torch
 import torch.nn.functional as F
 
 from ..models.transformer import DiffusionTransformer, KVCache
-from .trace import TrajectorySample, TrajectoryStep
+from .trace import (
+    TokenDistribution,
+    TopKPrediction,
+    TrajectorySample,
+    TrajectoryStep,
+)
 from .utils import (
     confidence_scores,
     get_num_transfer_tokens,
@@ -63,6 +68,7 @@ class CanvasConfig:
         None  # window size beyond block end; None -> suffix
     )
     record_trace: bool = False
+    trace_topk: int = 0  # 0 stores states/log-probs only; >0 adds compact dists
 
 
 @dataclass
@@ -111,6 +117,10 @@ def generate_canvas(
         raise ValueError("prefix_cache is not combinable with CFG")
     if cfg.prefix_cache and not isinstance(model, DiffusionTransformer):
         raise TypeError("prefix_cache requires a dllm DiffusionTransformer")
+    if cfg.trace_topk < 0:
+        raise ValueError("trace_topk must be non-negative")
+    if cfg.trace_topk and not cfg.record_trace:
+        raise ValueError("trace_topk requires record_trace=True")
     if cfg.suppress_eos_logits or cfg.suppress_eos_confidence:
         if cfg.eos_token_id is None:
             raise ValueError("eos_token_id required for EOS suppression options")
@@ -240,6 +250,7 @@ def generate_canvas(
                     s,
                     global_step,
                     blk,
+                    cfg.trace_topk,
                 )
 
             xb = x[:, s:e]
@@ -261,8 +272,20 @@ def generate_canvas(
     )
 
 
-def _record(traces, x, mask_token_id, commit, blk_logits, x0, s, step, blk):
+def _record(
+    traces,
+    x,
+    mask_token_id,
+    commit,
+    blk_logits,
+    x0,
+    s,
+    step,
+    blk,
+    trace_topk,
+):
     logp = F.log_softmax(blk_logits.float(), dim=-1)
+    probs = logp.exp()
     lp_x0 = torch.gather(logp, -1, x0.unsqueeze(-1)).squeeze(-1)
     B, L = x.shape
     masked_all = x == mask_token_id
@@ -274,6 +297,54 @@ def _record(traces, x, mask_token_id, commit, blk_logits, x0, s, step, blk):
             if cm[j]:
                 committed_full[s + j] = True
                 clp[s + j] = float(lp_x0[b, j])
+        active = masked_all[b, s : s + cm.shape[0]]
+        active_probs = probs[b, active]
+        meta = {
+            "masked_count": int(active.sum().item()),
+            "commit_count": int(cm.sum().item()),
+        }
+        distributions = []
+        if active_probs.numel():
+            selected_probs = torch.gather(
+                probs[b], -1, x0[b].unsqueeze(-1)
+            ).squeeze(-1)
+            meta["pmax_mean"] = float(selected_probs[active].mean().item())
+            top2 = torch.topk(
+                active_probs, k=min(2, active_probs.shape[-1]), dim=-1
+            ).values
+            margin = (
+                top2[:, 0] - top2[:, 1]
+                if top2.shape[-1] == 2
+                else top2[:, 0]
+            )
+            meta["margin_mean"] = float(margin.mean().item())
+
+            if trace_topk:
+                k = min(trace_topk, active_probs.shape[-1])
+                values, indices = torch.topk(active_probs, k=k, dim=-1)
+                normalized = values / values.sum(dim=-1, keepdim=True).clamp(
+                    min=torch.finfo(values.dtype).tiny
+                )
+                entropy = -(normalized * normalized.clamp_min(1e-12).log()).sum(
+                    dim=-1
+                )
+                meta["entropy_topk_mean"] = float(entropy.mean().item())
+                active_positions = torch.nonzero(active, as_tuple=True)[0]
+                for row, relative in enumerate(active_positions.tolist()):
+                    distributions.append(
+                        TokenDistribution(
+                            position=s + int(relative),
+                            topk=[
+                                TopKPrediction(
+                                    token_id=int(token_id),
+                                    probability=float(probability),
+                                )
+                                for token_id, probability in zip(
+                                    indices[row].tolist(), values[row].tolist()
+                                )
+                            ],
+                        )
+                    )
         traces[b].steps.append(
             TrajectoryStep(
                 step=step,
@@ -282,6 +353,8 @@ def _record(traces, x, mask_token_id, commit, blk_logits, x0, s, step, blk):
                 masked=masked_all[b].tolist(),
                 committed=committed_full,
                 commit_logprob=clp,
+                distributions=distributions,
+                meta=meta,
             )
         )
 

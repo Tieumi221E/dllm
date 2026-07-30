@@ -18,6 +18,7 @@ number of forward passes. ``collapse="block"`` gives one state per block.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Callable, List, Union
 
@@ -30,6 +31,28 @@ class StepLogProb:
     step: int  # collapsed step value
     positions: torch.Tensor  # (n,) absolute positions (over prompt+gen)
     logp: torch.Tensor  # (n,) log p(token | reconstructed state)
+
+
+@dataclass
+class TrajectoryState:
+    """One reconstructed denoising state and its token action."""
+
+    step: int
+    block: int
+    input_ids: torch.Tensor  # (L_state,)
+    positions: torch.Tensor  # (n,) absolute target positions
+    target_ids: torch.Tensor  # (n,)
+
+
+@dataclass
+class PPOObjective:
+    """Differentiable PPO objective plus detached diagnostics."""
+
+    loss: torch.Tensor
+    policy_loss: torch.Tensor
+    kl_loss: torch.Tensor
+    clip_fraction: torch.Tensor
+    ratio_mean: torch.Tensor
 
 
 def _collapse_step_map(
@@ -52,9 +75,7 @@ def _collapse_step_map(
     raise ValueError("collapse must be 'none', 'block', or a positive int")
 
 
-@torch.no_grad()
-def trajectory_logprobs(
-    model_fn: Callable[[torch.Tensor], torch.Tensor],
+def trajectory_states(
     prompt_ids: torch.Tensor,  # (Lp,)
     gen_ids: torch.Tensor,  # (Lg,) final generated tokens (untruncated canvas region)
     step_map: torch.Tensor,  # (Lg,) commit step per position (-1 = never)
@@ -62,25 +83,32 @@ def trajectory_logprobs(
     block_length: int,
     canvas: str = "incremental",
     collapse: Union[str, int] = "block",
-    chunk: int = 8,
-) -> List[StepLogProb]:
-    """Reconstruct per-step states and compute log p(committed tokens | state).
+) -> List[TrajectoryState]:
+    """Reconstruct the model inputs and token actions for a rollout.
 
-    Every generated position with ``step_map >= 0`` appears in exactly one
-    returned entry. Use the same ``canvas`` as the rollout sampler.
-
-    ``model_fn``: (N, L) ids -> (N, L, V) logits.
+    This function is model-free and does not retain an autograd graph.  The
+    returned states can therefore be reused for old-policy scoring, current
+    policy scoring, trajectory distillation, or diagnostics.
     """
     if canvas not in ("incremental", "full"):
         raise ValueError("canvas must be 'incremental' or 'full'")
+    if block_length <= 0:
+        raise ValueError("block_length must be positive")
+    if prompt_ids.ndim != 1 or gen_ids.ndim != 1 or step_map.ndim != 1:
+        raise ValueError("prompt_ids, gen_ids, and step_map must be 1-D")
+    if gen_ids.shape != step_map.shape:
+        raise ValueError("gen_ids and step_map must have the same length")
     device = prompt_ids.device
     Lp, Lg = int(prompt_ids.numel()), int(gen_ids.numel())
-    full = torch.cat([prompt_ids, gen_ids])
+    full = torch.cat([prompt_ids, gen_ids.to(device)])
     pos_idx = torch.arange(Lg, device=device)
     block_ids = pos_idx // block_length
+    step_map = step_map.to(device)
 
-    csteps = _collapse_step_map(step_map.to(device), block_ids, collapse)
-    valid = step_map.to(device) >= 0
+    csteps = _collapse_step_map(step_map, block_ids, collapse)
+    valid = step_map >= 0
+    if not valid.any():
+        return []
 
     # ordered unique collapsed steps (blocks are decoded left-to-right, and
     # within a block steps increase, so sort by (block, step))
@@ -88,7 +116,7 @@ def trajectory_logprobs(
     order = torch.argsort(keys[:, 0] * 10**9 + keys[:, 1])
     keys = keys[order]
 
-    states, targets_list, meta = [], [], []
+    states = []
     for b_val, s_val in keys.tolist():
         in_block = block_ids == b_val
         tgt = valid & in_block & (csteps == s_val)
@@ -105,29 +133,155 @@ def trajectory_logprobs(
             state = full.clone()
             future = block_ids > b_val
             state[Lp:][not_committed | future] = mask_token_id
-        states.append(state)
-        targets_list.append(tgt)
-        meta.append((int(b_val), int(s_val)))
+        positions = Lp + torch.nonzero(tgt, as_tuple=True)[0]
+        states.append(
+            TrajectoryState(
+                step=int(s_val),
+                block=int(b_val),
+                input_ids=state,
+                positions=positions,
+                target_ids=full[positions],
+            )
+        )
+    return states
+
+
+def _model_logits(model_fn, input_ids: torch.Tensor) -> torch.Tensor:
+    output = model_fn(input_ids)
+    return output.logits if hasattr(output, "logits") else output
+
+
+def score_trajectory_states(
+    model_fn: Callable[[torch.Tensor], torch.Tensor],
+    states: List[TrajectoryState],
+    *,
+    chunk: int = 8,
+    with_grad: bool = False,
+) -> List[StepLogProb]:
+    """Score pre-built trajectory states, optionally retaining gradients."""
+    if chunk <= 0:
+        raise ValueError("chunk must be positive")
 
     out: List[StepLogProb] = []
     i = 0
-    while i < len(states):
-        # batch a contiguous run of equal-length states (never pad - padding
-        # would pollute bidirectional attention)
-        run = []
-        for j in range(i, len(states)):
-            if int(states[j].numel()) == int(states[i].numel()) and len(run) < chunk:
-                run.append(j)
-            else:
-                break
-        batch = torch.stack([states[j] for j in run])
-        logits = model_fn(batch)
-        for k, j in enumerate(run):
-            tgt = targets_list[j]
-            positions = Lp + torch.nonzero(tgt, as_tuple=True)[0]
-            rows = logits[k, positions, :].float()
-            logp = F.log_softmax(rows, dim=-1)
-            token_lp = logp.gather(1, full[positions].unsqueeze(1)).squeeze(1)
-            out.append(StepLogProb(step=meta[j][1], positions=positions, logp=token_lp))
-        i = run[-1] + 1
+    grad_context = nullcontext() if with_grad else torch.no_grad()
+    with grad_context:
+        while i < len(states):
+            # Batch only a contiguous run of equal-length states. Padding would
+            # alter bidirectional attention unless every adapter handled it.
+            run = []
+            for j in range(i, len(states)):
+                if (
+                    states[j].input_ids.numel() == states[i].input_ids.numel()
+                    and len(run) < chunk
+                ):
+                    run.append(j)
+                else:
+                    break
+            batch = torch.stack([states[j].input_ids for j in run])
+            logits = _model_logits(model_fn, batch)
+            for k, j in enumerate(run):
+                state = states[j]
+                rows = logits[k, state.positions, :].float()
+                logp = F.log_softmax(rows, dim=-1)
+                token_lp = logp.gather(
+                    1, state.target_ids.unsqueeze(1)
+                ).squeeze(1)
+                out.append(
+                    StepLogProb(
+                        step=state.step,
+                        positions=state.positions,
+                        logp=token_lp,
+                    )
+                )
+            i = run[-1] + 1
     return out
+
+
+def trajectory_logprobs(
+    model_fn: Callable[[torch.Tensor], torch.Tensor],
+    prompt_ids: torch.Tensor,
+    gen_ids: torch.Tensor,
+    step_map: torch.Tensor,
+    mask_token_id: int,
+    block_length: int,
+    canvas: str = "incremental",
+    collapse: Union[str, int] = "block",
+    chunk: int = 8,
+    with_grad: bool = False,
+) -> List[StepLogProb]:
+    """Compute token log-probabilities on reconstructed rollout states.
+
+    Every generated position with ``step_map >= 0`` appears exactly once.
+    ``with_grad=False`` preserves the inexpensive scoring behavior; set it to
+    ``True`` for policy optimization.
+    """
+    states = trajectory_states(
+        prompt_ids,
+        gen_ids,
+        step_map,
+        mask_token_id,
+        block_length,
+        canvas=canvas,
+        collapse=collapse,
+    )
+    return score_trajectory_states(
+        model_fn, states, chunk=chunk, with_grad=with_grad
+    )
+
+
+def ppo_clip_objective(
+    logp: torch.Tensor,
+    old_logp: torch.Tensor,
+    advantage: Union[float, torch.Tensor],
+    *,
+    clip_eps: float = 0.2,
+    beta: float = 0.01,
+    kl_estimator: str = "k3",
+) -> PPOObjective:
+    """Token-level clipped PPO objective used by trajectory RL.
+
+    ``kl_estimator="k3"`` uses ``exp(-Δ)-1+Δ`` for
+    ``Δ = logp - old_logp``.  ``"k1"`` retains the sampled ``Δ`` estimator,
+    and ``"none"`` disables the KL term.
+    """
+    if logp.shape != old_logp.shape:
+        raise ValueError("logp and old_logp must have the same shape")
+    if not 0.0 <= clip_eps < 1.0:
+        raise ValueError("clip_eps must be in [0, 1)")
+    if beta < 0.0:
+        raise ValueError("beta must be non-negative")
+    if kl_estimator not in ("k3", "k1", "none"):
+        raise ValueError("kl_estimator must be 'k3', 'k1', or 'none'")
+    if logp.numel() == 0:
+        zero = logp.sum()
+        return PPOObjective(zero, zero, zero, zero.detach(), zero.detach())
+
+    old_logp = old_logp.to(device=logp.device, dtype=logp.dtype)
+    advantage = torch.as_tensor(
+        advantage, device=logp.device, dtype=logp.dtype
+    )
+    delta = logp - old_logp
+    ratio = delta.exp()
+    clipped = ratio.clamp(1.0 - clip_eps, 1.0 + clip_eps)
+    policy_loss = -torch.minimum(ratio * advantage, clipped * advantage).mean()
+
+    if kl_estimator == "k3":
+        kl = (-delta).exp() - 1.0 + delta
+    elif kl_estimator == "k1":
+        kl = delta
+    else:
+        kl = torch.zeros_like(delta)
+    kl_loss = beta * kl.mean()
+    return PPOObjective(
+        loss=policy_loss + kl_loss,
+        policy_loss=policy_loss,
+        kl_loss=kl_loss,
+        clip_fraction=(
+            (ratio < 1.0 - clip_eps) | (ratio > 1.0 + clip_eps)
+        )
+        .float()
+        .mean()
+        .detach(),
+        ratio_mean=ratio.mean().detach(),
+    )

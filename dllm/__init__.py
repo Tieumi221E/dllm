@@ -9,11 +9,11 @@ Models:     DiffusionTransformer (MHA/GQA x learned/RoPE, KV cache), HF wrapper
 References for the algorithms are listed in the README.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 from .schedules import NoiseSchedule, LinearSchedule, CosineSchedule, get_schedule
 from .masking import MaskingOutput, forward_process, make_labels, random_truncate
-from .loss import diffusion_loss, mc_conditional_nll
+from .loss import diffusion_loss, masked_cross_entropy, mc_conditional_nll
 from .data import PretrainCollator, SFTCollator, BlockSFTCollator
 from .models import DiffusionTransformer, KVCache
 from .sampling import (
@@ -25,8 +25,18 @@ from .sampling import (
     generate_blockwise,
     TrajectorySample,
     TrajectoryStep,
+    TokenDistribution,
+    TopKPrediction,
 )
-from .rl import StepLogProb, trajectory_logprobs
+from .rl import (
+    PPOObjective,
+    StepLogProb,
+    TrajectoryState,
+    ppo_clip_objective,
+    score_trajectory_states,
+    trajectory_logprobs,
+    trajectory_states,
+)
 from .presets import get_preset, list_presets
 
 __all__ = [
@@ -42,6 +52,7 @@ __all__ = [
     "random_truncate",
     # loss & eval
     "diffusion_loss",
+    "masked_cross_entropy",
     "mc_conditional_nll",
     # data
     "PretrainCollator",
@@ -59,9 +70,16 @@ __all__ = [
     "generate_blockwise",
     "TrajectorySample",
     "TrajectoryStep",
+    "TokenDistribution",
+    "TopKPrediction",
     # rl
+    "PPOObjective",
     "StepLogProb",
+    "TrajectoryState",
+    "ppo_clip_objective",
+    "score_trajectory_states",
     "trajectory_logprobs",
+    "trajectory_states",
     # presets
     "get_preset",
     "list_presets",

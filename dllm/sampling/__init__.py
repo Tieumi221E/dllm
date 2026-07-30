@@ -5,7 +5,12 @@ from .blockwise import (
     block_causal_bias,
     generate_blockwise,
 )
-from .trace import TrajectorySample, TrajectoryStep
+from .trace import (
+    TokenDistribution,
+    TopKPrediction,
+    TrajectorySample,
+    TrajectoryStep,
+)
 from .utils import (
     add_gumbel_noise,
     confidence_scores,
@@ -24,6 +29,8 @@ __all__ = [
     "block_causal_bias",
     "TrajectorySample",
     "TrajectoryStep",
+    "TokenDistribution",
+    "TopKPrediction",
     "add_gumbel_noise",
     "confidence_scores",
     "get_num_transfer_tokens",
