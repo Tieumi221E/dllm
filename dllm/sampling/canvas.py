@@ -29,6 +29,13 @@ import torch.nn.functional as F
 from ..execution import CacheSemantics
 from ..models.protocol import extract_logits
 from ..models.transformer import DiffusionTransformer, KVCache
+from .policies import (
+    CommitPolicy,
+    CommitSpec,
+    CommitState,
+    apply_commit_policy,
+    resolve_commit_policy,
+)
 from .trace import (
     TokenDistribution,
     TopKPrediction,
@@ -37,16 +44,11 @@ from .trace import (
 )
 from .utils import (
     confidence_scores,
-    get_num_transfer_tokens,
     sample_candidates,
-    select_threshold_commits,
-    select_topk_commits,
     split_steps,
     strip_after_eos,
     suppress_tokens_,
 )
-
-_COMMITS = ("transfer", "threshold")
 
 
 @dataclass
@@ -56,7 +58,7 @@ class CanvasConfig:
     steps: int = 128
     temperature: float = 0.0
     sampling: str = "gumbel"  # "gumbel" | "multinomial"
-    commit: str = "transfer"
+    commit: CommitSpec = "transfer"
     confidence: str = "prob"  # prob | margin | neg_entropy | random
     threshold: float = 0.9  # for commit="threshold"
     cfg_scale: float = 0.0
@@ -113,8 +115,11 @@ def generate_canvas(
     cfg = config or CanvasConfig()
     if overrides:
         cfg = dataclass_replace(cfg, **overrides)
-    if cfg.commit not in _COMMITS:
-        raise ValueError(f"commit must be one of {_COMMITS}")
+    if cfg.steps <= 0:
+        raise ValueError("steps must be positive")
+    policy: CommitPolicy = resolve_commit_policy(
+        cfg.commit, threshold=cfg.threshold
+    )
     if cfg.prefix_cache and cfg.cfg_scale > 0:
         raise ValueError("prefix_cache is not combinable with CFG")
     if cfg.prefix_cache and not isinstance(model, DiffusionTransformer):
@@ -187,7 +192,6 @@ def generate_canvas(
         if cur_steps == 0:
             cur_steps = 1
         block_mask0 = x[:, s:e] == mask_token_id
-        quota = get_num_transfer_tokens(block_mask0, cur_steps)
 
         # -- prefix cache: one full forward per block, then window updates --
         cache: Optional[KVCache] = None
@@ -198,10 +202,12 @@ def generate_canvas(
         )
 
         i = 0
-        max_iters = cur_steps if cfg.commit != "threshold" else block_len + cur_steps
-        while i < max_iters:
-            if (x[:, s:e] == mask_token_id).sum() == 0:
-                break
+        max_iters = int(block_mask0.sum(dim=-1).max().item())
+        while bool((x[:, s:e] == mask_token_id).any()):
+            if i >= max_iters:
+                raise RuntimeError(
+                    "commit policy exceeded the progress bound"
+                )
 
             if cfg.prefix_cache:
                 if cache is None:
@@ -244,12 +250,17 @@ def generate_canvas(
                 conf = conf.masked_fill(x0 == cfg.eos_token_id, float("-inf"))
 
             blk_masked = x[:, s:e] == mask_token_id
-            cand_conf = conf.masked_fill(~blk_masked, float("-inf"))
-            if cfg.commit == "transfer":
-                q = quota[:, min(i, cur_steps - 1)]
-                commit = select_topk_commits(cand_conf, q)
-            else:
-                commit = select_threshold_commits(cand_conf, cfg.threshold)
+            decision = apply_commit_policy(
+                policy,
+                CommitState(
+                    confidence=conf,
+                    candidates=blk_masked,
+                    initial_mask=block_mask0,
+                    step=i,
+                    steps=cur_steps,
+                ),
+            )
+            commit = decision.commit
 
             if cfg.record_trace:
                 _record(
@@ -263,6 +274,7 @@ def generate_canvas(
                     global_step,
                     blk,
                     cfg.trace_topk,
+                    decision.selection_logprob,
                 )
 
             xb = x[:, s:e]
@@ -295,6 +307,7 @@ def _record(
     step,
     blk,
     trace_topk,
+    selection_logprob,
 ):
     logp = F.log_softmax(blk_logits.float(), dim=-1)
     probs = logp.exp()
@@ -366,6 +379,11 @@ def _record(
                 committed=committed_full,
                 commit_logprob=clp,
                 distributions=distributions,
+                selection_logprob=(
+                    None
+                    if selection_logprob is None
+                    else float(selection_logprob[b].item())
+                ),
                 meta=meta,
             )
         )

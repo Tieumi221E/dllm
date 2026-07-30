@@ -23,16 +23,24 @@ from dllm import (
     BlockSFTCollator,
     BlockwiseConfig,
     CanvasConfig,
+    CommitDecision,
+    CommitState,
     DenoiserInput,
     DenoiserOutput,
     DiffusionTransformer,
     LinearSchedule,
     PretrainCollator,
+    QuotaCommitPolicy,
     SFTCollator,
+    SelfSpecConfig,
+    ThresholdCommitPolicy,
+    TopologySelfSpecBackend,
+    apply_commit_policy,
     diffusion_loss,
     forward_process,
     generate_blockwise,
     generate_canvas,
+    generate_self_speculative,
     get_schedule,
     masked_cross_entropy,
     mc_conditional_nll,
@@ -437,6 +445,76 @@ def test_canvas_modes_run():
     assert restored.to_dict() == tr.to_dict()
 
 
+def test_custom_commit_policy_records_selection_action():
+    class LeftmostPolicy:
+        def select(self, state):
+            commit = torch.zeros_like(state.candidates)
+            for row in range(commit.shape[0]):
+                positions = torch.nonzero(
+                    state.candidates[row], as_tuple=True
+                )[0]
+                if positions.numel():
+                    commit[row, positions[0]] = True
+            selection_logprob = torch.full(
+                (commit.shape[0],),
+                -0.25,
+                device=commit.device,
+            )
+            return CommitDecision(commit, selection_logprob)
+
+    model = tiny_model()
+    prompt = torch.randint(0, V, (1, 5))
+    output = generate_canvas(
+        model,
+        prompt,
+        MASK,
+        CanvasConfig(
+            gen_length=6,
+            block_length=3,
+            steps=2,
+            commit=LeftmostPolicy(),
+            record_trace=True,
+        ),
+    )
+    assert (output.canvas[:, 5:] != MASK).all()
+    assert all(
+        step.selection_logprob == -0.25
+        for step in output.traces[0].steps
+    )
+
+
+def test_commit_policy_progress_and_candidate_boundary():
+    confidence = torch.full((2, 4), float("-inf"))
+    candidates = torch.tensor(
+        [[True, False, True, False], [False, True, False, False]]
+    )
+    state = CommitState(
+        confidence=confidence,
+        candidates=candidates,
+        initial_mask=candidates.clone(),
+        step=0,
+        steps=2,
+    )
+    for policy in (
+        QuotaCommitPolicy(),
+        ThresholdCommitPolicy(threshold=0.9),
+    ):
+        decision = apply_commit_policy(policy, state)
+        assert (decision.commit & ~candidates).sum() == 0
+        assert decision.commit.any(dim=-1).all()
+
+    class InvalidPolicy:
+        def select(self, current):
+            return CommitDecision(~current.candidates)
+
+    try:
+        apply_commit_policy(InvalidPolicy(), state)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for a non-candidate commit")
+
+
 def test_trace_topk_and_summary():
     model = tiny_model()
     prompt = torch.randint(0, V, (1, 5))
@@ -531,6 +609,92 @@ def test_blockwise_eos_early_exit():
     for seq in out.sequences:
         assert EOS not in seq  # stripped
     assert (out.canvas[:, :4] == prompt.expand(3, -1)).all()
+
+
+def _causal_greedy(model, prompt, max_new_tokens):
+    sequence = prompt.clone()
+    generated = []
+    for _ in range(max_new_tokens):
+        topology = AttentionTopology.causal(
+            batch_size=1,
+            length=sequence.shape[1],
+            device=sequence.device,
+        )
+        logits = model(sequence, topology=topology)[:, -1:, :].clone()
+        logits[..., MASK] = float("-inf")
+        token = logits.argmax(dim=-1)
+        generated.append(token)
+        sequence = torch.cat([sequence, token], dim=1)
+    return torch.cat(generated, dim=1)
+
+
+def test_linear_self_speculation_matches_causal_greedy():
+    model = tiny_model(pos="rope")
+    prompt = torch.randint(0, V - 4, (1, 6))
+    expected = _causal_greedy(model, prompt, max_new_tokens=9)
+    backend = TopologySelfSpecBackend(model, draft_shift=True)
+
+    policies = (
+        (ThresholdCommitPolicy(threshold=0.0), 1, 1.0),
+        (QuotaCommitPolicy(), 2, 0.0),
+    )
+    for policy, draft_steps, temperature in policies:
+        output = generate_self_speculative(
+            backend,
+            prompt,
+            MASK,
+            SelfSpecConfig(
+                max_new_tokens=9,
+                block_length=4,
+                draft_steps=draft_steps,
+                commit=policy,
+                temperature=temperature,
+            ),
+            generator=torch.Generator().manual_seed(17),
+        )
+        assert torch.equal(output.token_ids, expected)
+        assert output.stats.emitted_tokens == 9
+        assert output.stats.verifier_forwards >= 1
+        assert output.nfe == (
+            output.stats.draft_forwards
+            + output.stats.verifier_forwards
+        )
+
+    terminal = int(expected[0, 3])
+    terminal_end = expected[0].tolist().index(terminal) + 1
+    stopped = generate_self_speculative(
+        backend,
+        prompt,
+        MASK,
+        SelfSpecConfig(
+            max_new_tokens=9,
+            block_length=4,
+            terminal_token_ids=(terminal,),
+        ),
+    )
+    assert torch.equal(
+        stopped.token_ids, expected[:, :terminal_end]
+    )
+    assert stopped.stats.emitted_tokens == terminal_end
+
+
+def test_kv_cache_crop_preserves_provenance():
+    model = tiny_model(pos="rope")
+    ids = torch.randint(0, V, (2, 7))
+    topology = AttentionTopology.causal(batch_size=2, length=7)
+    cache = model.build_kv_cache(ids, topology=topology)
+    cropped = cache.crop(4)
+    assert cache.length == 7
+    assert cropped.length == 4
+    assert torch.equal(cropped.position_ids, cache.position_ids[:, :4])
+    assert torch.equal(cropped.group_ids, cache.group_ids[:, :4])
+    assert cropped.semantics == cache.semantics
+    try:
+        cache.crop(8)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for overlong cache crop")
 
 
 # ----------------------------------- RL ------------------------------------ #
