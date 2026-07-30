@@ -55,6 +55,47 @@ class Denoiser(Protocol):
         ...
 
 
+@runtime_checkable
+class BlockCacheDenoiser(Protocol):
+    """Model with exact ordered-prefix cache extension.
+
+    Cache objects returned by ``build_kv_cache`` must provide
+    ``index_select`` and ``extend``. ``forward_block`` returns either logits
+    or a tuple whose first item is logits and second item is appendable cache
+    state.
+    """
+
+    def build_kv_cache(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        **kwargs: Any,
+    ) -> Any:
+        ...
+
+    def forward_block(
+        self,
+        block_ids: torch.Tensor,
+        cache: Any,
+        attention_mask: Optional[torch.Tensor] = None,
+        **kwargs: Any,
+    ) -> Any:
+        ...
+
+
+@runtime_checkable
+class PrefixCacheDenoiser(BlockCacheDenoiser, Protocol):
+    """Model that can build an explicitly approximate full-canvas prefix."""
+
+    def build_approximate_prefix_cache(
+        self,
+        input_ids: torch.Tensor,
+        prefix_length: int,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> DenoiserOutput:
+        ...
+
+
 def extract_logits(output: Any) -> torch.Tensor:
     """Normalize common tensor, structured, and tuple model outputs."""
     if isinstance(output, torch.Tensor):
@@ -71,6 +112,8 @@ def extract_logits(output: Any) -> torch.Tensor:
 
 __all__ = [
     "Denoiser",
+    "BlockCacheDenoiser",
+    "PrefixCacheDenoiser",
     "DenoiserInput",
     "DenoiserOutput",
     "ModelCapabilities",

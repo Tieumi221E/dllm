@@ -109,33 +109,60 @@ def suppress_tokens_(logits: torch.Tensor, token_ids: Sequence[int]) -> torch.Te
 def select_topk_commits(
     confidence: torch.Tensor,  # (B, L), -inf outside candidates
     quota: torch.Tensor,  # (B,) int
+    candidates: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Commit mask: per row, the ``quota[b]`` highest-confidence candidates."""
+    """Commit the per-row quota of highest-confidence candidates.
+
+    ``candidates`` is the authoritative membership mask when provided. The
+    legacy two-argument form treats finite confidence entries as candidates.
+    """
     B, L = confidence.shape
     commit = torch.zeros(B, L, dtype=torch.bool, device=confidence.device)
+    if candidates is None:
+        candidates = confidence > float("-inf")
+    elif candidates.shape != confidence.shape:
+        raise ValueError("candidates must match confidence")
+    elif candidates.dtype != torch.bool:
+        raise TypeError("candidates must be boolean")
+    elif candidates.device != confidence.device:
+        raise ValueError("candidates and confidence must share a device")
     for b in range(B):
-        k = int(quota[b].item())
+        positions = torch.nonzero(candidates[b], as_tuple=True)[0]
+        k = min(int(quota[b].item()), int(positions.numel()))
         if k > 0:
-            _, sel = torch.topk(confidence[b], k=min(k, L))
-            commit[b, sel] = True
-    # guard: never "commit" a -inf slot (can happen if quota exceeds candidates)
-    commit &= confidence > float("-inf")
+            relative = torch.topk(confidence[b, positions], k=k).indices
+            commit[b, positions[relative]] = True
     return commit
 
 
 def select_threshold_commits(
     confidence: torch.Tensor,  # (B, L), -inf outside candidates
     threshold: float,
+    candidates: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Commit everything >= threshold, at least the best one per row that
-    still has candidates."""
-    candidates = confidence > float("-inf")
+    still has candidates.
+
+    ``candidates`` is explicit when scores such as suppressed-EOS confidence
+    may legitimately be ``-inf``. The legacy two-argument form infers
+    membership from finite scores.
+    """
+    if candidates is None:
+        candidates = confidence > float("-inf")
+    elif candidates.shape != confidence.shape:
+        raise ValueError("candidates must match confidence")
+    elif candidates.dtype != torch.bool:
+        raise TypeError("candidates must be boolean")
+    elif candidates.device != confidence.device:
+        raise ValueError("candidates and confidence must share a device")
     commit = candidates & (confidence >= threshold)
     need_fallback = candidates.any(dim=-1) & ~commit.any(dim=-1)
     if need_fallback.any():
-        best = confidence.argmax(dim=-1)
         rows = torch.nonzero(need_fallback, as_tuple=True)[0]
-        commit[rows, best[rows]] = True
+        for row in rows.tolist():
+            positions = torch.nonzero(candidates[row], as_tuple=True)[0]
+            relative = confidence[row, positions].argmax()
+            commit[row, positions[relative]] = True
     return commit
 
 

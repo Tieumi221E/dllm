@@ -21,9 +21,9 @@ from .speculative import (
     SelfSpecOutput,
     SelfSpecStats,
     SelfSpecStep,
-    TopologySelfSpecBackend,
     generate_self_speculative,
 )
+from .backends import TopologySelfSpecBackend
 from .trace import (
     TokenDistribution,
     TopKPrediction,

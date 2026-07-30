@@ -18,13 +18,12 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import dllm as dllm_package
 from dllm import (
     AttentionTopology,
     BlockSFTCollator,
     BlockwiseConfig,
     CanvasConfig,
-    CommitDecision,
-    CommitState,
     DenoiserInput,
     DenoiserOutput,
     DiffusionTransformer,
@@ -35,7 +34,6 @@ from dllm import (
     SelfSpecConfig,
     ThresholdCommitPolicy,
     TopologySelfSpecBackend,
-    apply_commit_policy,
     diffusion_loss,
     forward_process,
     generate_blockwise,
@@ -49,8 +47,19 @@ from dllm import (
     trajectory_logprobs,
     trajectory_states,
 )
-from dllm.sampling import block_causal_bias
-from dllm.sampling.utils import get_num_transfer_tokens, split_steps
+from dllm.sampling import (
+    CommitDecision,
+    CommitState,
+    apply_commit_policy,
+    block_causal_bias,
+)
+from dllm.models import BlockCacheDenoiser, PrefixCacheDenoiser
+from dllm.sampling.utils import (
+    get_num_transfer_tokens,
+    select_threshold_commits,
+    select_topk_commits,
+    split_steps,
+)
 
 torch.manual_seed(0)
 
@@ -320,7 +329,22 @@ def test_cache_matches_multiblock_topology_recomputation():
         expected = model(full, topology=topology)[:, -3:]
         assert torch.allclose(out2.logits, expected, atol=1e-4), pos
         assert out2.cache.semantics.exact
-        assert out2.cache.semantics.topology == "block_causal"
+        assert out2.cache.semantics.topology == "ordered"
+
+
+def test_exact_cache_rejects_non_ordered_extension():
+    model = tiny_model()
+    prefix = torch.randint(0, V, (1, 5))
+    topology = AttentionTopology.causal(batch_size=1, length=5)
+    cache = model.build_kv_cache(prefix, topology=topology)
+    block = torch.randint(0, V, (1, 2))
+    invalid_groups = torch.tensor([[4, 5]])
+    try:
+        model.forward_block(block, cache, group_ids=invalid_groups)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for non-ordered extension")
 
 
 def test_kv_cache_extend_and_mask():
@@ -515,6 +539,39 @@ def test_commit_policy_progress_and_candidate_boundary():
         raise AssertionError("expected ValueError for a non-candidate commit")
 
 
+def test_commit_selectors_preserve_legacy_and_explicit_candidates():
+    confidence = torch.tensor([[0.1, float("-inf"), 0.8, 0.3]])
+    quota = torch.tensor([2])
+    assert torch.equal(
+        select_topk_commits(confidence, quota),
+        torch.tensor([[False, False, True, True]]),
+    )
+    assert torch.equal(
+        select_threshold_commits(confidence, 0.5),
+        torch.tensor([[False, False, True, False]]),
+    )
+
+    suppressed = torch.full((1, 3), float("-inf"))
+    candidates = torch.tensor([[False, True, True]])
+    assert torch.equal(
+        select_topk_commits(suppressed, torch.tensor([1]), candidates),
+        torch.tensor([[False, True, False]]),
+    )
+    threshold_commit = select_threshold_commits(
+        suppressed, 0.9, candidates
+    )
+    assert threshold_commit.sum().item() == 1
+    assert (threshold_commit & ~candidates).sum().item() == 0
+
+
+def test_root_api_is_curated_without_breaking_direct_imports():
+    assert "CanvasConfig" in dllm_package.__all__
+    assert "CommitState" not in dllm_package.__all__
+    assert "BlockCacheDenoiser" not in dllm_package.__all__
+    assert dllm_package.CommitState is CommitState
+    assert dllm_package.BlockCacheDenoiser is BlockCacheDenoiser
+
+
 def test_trace_topk_and_summary():
     model = tiny_model()
     prompt = torch.randint(0, V, (1, 5))
@@ -562,6 +619,68 @@ def test_canvas_prefix_cache_runs():
     assert (out_w.canvas[:, 6:] != MASK).all()
     # cache is an approximation - shapes/termination matter, not equality
     assert out_c.canvas.shape == out_nc.canvas.shape
+
+
+def test_cache_sampler_protocols_accept_structural_adapter():
+    class Proxy:
+        def __init__(self, model):
+            self.model = model
+
+        def __call__(self, *args, **kwargs):
+            return self.model(*args, **kwargs)
+
+        def build_kv_cache(self, *args, **kwargs):
+            return self.model.build_kv_cache(*args, **kwargs)
+
+        def build_approximate_prefix_cache(self, *args, **kwargs):
+            return self.model.build_approximate_prefix_cache(
+                *args, **kwargs
+            )
+
+        def forward_block(self, *args, **kwargs):
+            return self.model.forward_block(*args, **kwargs)
+
+    model = tiny_model()
+    proxy = Proxy(model)
+    assert isinstance(proxy, BlockCacheDenoiser)
+    assert isinstance(proxy, PrefixCacheDenoiser)
+    prompt = torch.randint(0, V, (1, 6))
+
+    cached = generate_canvas(
+        proxy,
+        prompt,
+        MASK,
+        CanvasConfig(
+            gen_length=8,
+            block_length=4,
+            steps=8,
+            prefix_cache=True,
+        ),
+    )
+    assert (cached.canvas[:, 6:] != MASK).all()
+
+    incremental = generate_blockwise(
+        proxy,
+        prompt,
+        MASK,
+        BlockwiseConfig(
+            gen_length=8,
+            block_length=4,
+            steps_per_block=4,
+        ),
+    )
+    assert (incremental.canvas[:, 6:] != MASK).all()
+
+    prefix = model.build_approximate_prefix_cache(
+        torch.cat(
+            [prompt, torch.full((1, 4), MASK, dtype=torch.long)],
+            dim=1,
+        ),
+        prefix_length=6,
+    )
+    assert prefix.cache is not None
+    assert not prefix.cache.semantics.exact
+    assert prefix.cache.semantics.topology == "bidirectional_canvas"
 
 
 def test_blockwise_cache_equals_nocache():

@@ -17,10 +17,10 @@ dllm/
   data.py           PretrainCollator / SFTCollator / BlockSFTCollator
   topology.py       ordered bidirectional / causal / block-causal dependencies
   execution.py      exactness metadata shared by cache implementations
-  models/           topology-aware DiffusionTransformer, denoiser protocol,
-                    exact block-causal KV cache, HF wrapper
+  models/           denoiser/cache protocols, topology-aware reference model,
+                    exact ordered-prefix KV cache, HF wrapper
   sampling/         full-canvas / incremental / self-speculative generation,
-                    commit policies, and trajectory recording
+                    commit policies, reference backends, trajectory recording
   rl.py             trajectory state reconstruction + differentiable PPO primitives
   presets.py        regime presets (small-mha / small-gqa / llada-8b)
 docs/architecture.md capability boundaries and admission policy
@@ -32,6 +32,11 @@ The long-term package boundary and support tiers are described in
 mechanisms; model/framework integrations are adapters, while datasets,
 task-specific rewards, and complete experiment loops stay downstream.
 See [Changelog](CHANGELOG.md) for versioned API changes.
+
+The package root exposes the common training and generation workflows.
+Extension contracts and lower-level helpers live in `dllm.models` and
+`dllm.sampling`; existing direct root imports remain available for
+compatibility, but wildcard imports stay intentionally compact.
 
 ## Install
 
@@ -147,7 +152,8 @@ parallel decoding), or `generate_blockwise(...)` for truncated-canvas models
 Quota and threshold are built-in `CommitPolicy` implementations rather than
 sampler branches. `commit="transfer"` and `commit="threshold"` remain stable
 shorthands; a custom policy can return a `CommitDecision` with an optional
-position-selection log-probability for trajectory learning.
+position-selection log-probability for trajectory learning. Import the
+extension types from `dllm.sampling`.
 
 ### Linear self-speculation
 
@@ -231,7 +237,7 @@ traj.summary(EOS)                # rollout progress/confidence/log-prob stats
 | temperature | `"gumbel"` fp64 | `"multinomial"` = softmax(logits/T) (different distribution at T!=1) |
 | confidence | `"prob"` raw-softmax | `"margin"`, `"neg_entropy"`, `"random"` |
 | canvas | full canvas (`generate_canvas`) | incremental (`generate_blockwise`) - truncated-canvas regime |
-| blockwise attention | block-causal (KV cache exact; `use_cache` is speed-only) | - |
+| blockwise attention | block-causal (ordered-prefix KV cache exact; `use_cache` is speed-only) | - |
 | topology | bidirectional ordered group 0 | causal, fixed block, arbitrary ordered boundaries, raw mask escape hatch |
 | positions | `"learned"` | `"rope"` (recommended for new training) |
 | attention | GQA (`num_kv_heads`) or MHA; optional `attn_bias`/`ff_bias` | |
@@ -246,8 +252,9 @@ traj.summary(EOS)                # rollout progress/confidence/log-prob stats
   future [MASK] tokens are present. Training collator, sampler, and RL
   log-prob reconstruction must share one canvas regime; the API names it
   explicitly everywhere (`canvas="truncated" | "full"`).
-- **Cache honesty**: `generate_blockwise`'s cache is exact (block-causal by
-  construction, tested against an explicit staircase mask);
+- **Cache honesty**: `generate_blockwise`'s cache is exact for its ordered
+  prefix dependency (block-causal by construction, tested against an explicit
+  staircase mask);
   `generate_canvas(prefix_cache=True)` is a windowed approximation of the
   fully bidirectional canvas. Cache objects carry this exact/approximate
   provenance instead of hiding a semantic change behind a speed flag.
@@ -267,10 +274,11 @@ traj.summary(EOS)                # rollout progress/confidence/log-prob stats
 reference loss implementation (pretraining + SFT normalizations), ordered
 topology == explicit attention masks, multi-block KV-cache == full topology
 recomputation (learned & RoPE), padding invariance with explicit positions,
-cache-on/off generation equality, trajectory serialization and differentiable
-policy scoring, custom commit-policy actions, self-speculation equality with
-greedy causal decoding, and exact recovery of log V by the MC likelihood
-estimator on a uniform-logits model.
+cache-on/off generation equality, structural cache-adapter compatibility,
+cache provenance, trajectory serialization and differentiable policy scoring,
+custom commit-policy actions, self-speculation equality with greedy causal
+decoding, and exact recovery of log V by the MC likelihood estimator on a
+uniform-logits model.
 
 ## References
 
