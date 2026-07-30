@@ -14,6 +14,105 @@ import torch
 import torch.nn.functional as F
 
 _NORMS = ("tokens", "maskable", "answer", "masked", "sum")
+_REDUCTIONS = ("none", "sum", "token_mean", "sample_mean")
+
+
+def _broadcast_weight(
+    weight: torch.Tensor,
+    shape: torch.Size,
+    *,
+    name: str,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    value = torch.as_tensor(weight, device=device, dtype=dtype)
+    if value.ndim == 1 and value.shape[0] == shape[0]:
+        value = value.unsqueeze(1)
+    try:
+        return torch.broadcast_to(value, shape)
+    except RuntimeError as exc:
+        raise ValueError(
+            f"{name} with shape {tuple(value.shape)} is not broadcastable "
+            f"to {tuple(shape)}"
+        ) from exc
+
+
+def masked_cross_entropy(
+    logits: torch.Tensor,
+    target_ids: torch.Tensor,
+    selected: torch.Tensor,
+    *,
+    token_weight: Optional[torch.Tensor] = None,
+    sample_weight: Optional[torch.Tensor] = None,
+    reduction: str = "token_mean",
+) -> torch.Tensor:
+    """Cross-entropy over an explicit subset of token positions.
+
+    This is an estimator-agnostic primitive for objectives that do not match
+    :func:`diffusion_loss`.  Weighting and reduction are deliberately
+    independent:
+
+    - ``token_weight`` is broadcast over ``(B, L)`` before reduction;
+    - ``sample_weight`` applies only to ``reduction="sample_mean"``;
+    - ``sample_mean`` first averages selected tokens within each non-empty
+      sample, then averages samples (weighted when requested).
+
+    ``reduction="none"`` returns a dense ``(B, L)`` tensor with zeros outside
+    ``selected``.  This low-level function permits arbitrary estimators;
+    callers are responsible for their statistical interpretation.
+    """
+    if reduction not in _REDUCTIONS:
+        raise ValueError(f"reduction must be one of {_REDUCTIONS}")
+    if logits.ndim != 3:
+        raise ValueError("logits must have shape (B, L, V)")
+    if target_ids.shape != logits.shape[:2]:
+        raise ValueError("target_ids must match logits' (B, L) dimensions")
+    if selected.shape != target_ids.shape:
+        raise ValueError("selected must have shape (B, L)")
+    if sample_weight is not None and reduction != "sample_mean":
+        raise ValueError("sample_weight requires reduction='sample_mean'")
+
+    selected = selected.to(device=logits.device, dtype=torch.bool)
+    targets = target_ids.to(device=logits.device)
+    dense = logits[..., 0].float() * 0.0
+    if selected.any():
+        values = F.cross_entropy(
+            logits[selected].float(), targets[selected], reduction="none"
+        )
+        if token_weight is not None:
+            weights = _broadcast_weight(
+                token_weight,
+                target_ids.shape,
+                name="token_weight",
+                device=logits.device,
+                dtype=values.dtype,
+            )
+            values = values * weights[selected]
+        dense = dense.masked_scatter(selected, values)
+
+    if reduction == "none":
+        return dense
+    if reduction == "sum":
+        return dense.sum()
+
+    counts = selected.sum(dim=1)
+    if reduction == "token_mean":
+        return dense.sum() / counts.sum().clamp(min=1).to(dense.dtype)
+
+    valid = counts > 0
+    if not valid.any():
+        return dense.sum()
+    per_sample = dense.sum(dim=1) / counts.clamp(min=1).to(dense.dtype)
+    if sample_weight is None:
+        return per_sample[valid].mean()
+    weights = torch.as_tensor(
+        sample_weight, device=logits.device, dtype=dense.dtype
+    ).reshape(-1)
+    if weights.shape[0] != logits.shape[0]:
+        raise ValueError("sample_weight must contain one value per batch row")
+    return (per_sample[valid] * weights[valid]).sum() / weights[valid].sum().clamp(
+        min=torch.finfo(dense.dtype).eps
+    )
 
 
 def diffusion_loss(
@@ -60,28 +159,43 @@ def diffusion_loss(
         )
 
     B, L = target_ids.shape
-    masked_indices = masked_indices.bool()
-
-    if not masked_indices.any():
-        return logits.sum() * 0.0  # keep graph, zero loss
-
-    token_ce = F.cross_entropy(
-        logits[masked_indices], target_ids[masked_indices], reduction="none"
+    masked_indices = masked_indices.to(device=logits.device, dtype=torch.bool)
+    token_weight = (
+        None
+        if not importance_weight
+        else 1.0
+        / _broadcast_weight(
+            p_mask,
+            target_ids.shape,
+            name="p_mask",
+            device=logits.device,
+            dtype=torch.float32,
+        )
     )
-    if importance_weight:
-        token_ce = token_ce / p_mask[masked_indices]
+    token_ce = masked_cross_entropy(
+        logits,
+        target_ids,
+        masked_indices,
+        token_weight=token_weight,
+        reduction="none",
+    )
 
     if norm == "tokens":
         return token_ce.sum() / float(B * L)
     if norm == "maskable":
-        denom = maskable.to(torch.float32).sum().clamp(min=1.0)
+        denom = maskable.to(device=logits.device, dtype=torch.float32).sum().clamp(
+            min=1.0
+        )
         return token_ce.sum() / denom
     if norm == "answer":
-        row = masked_indices.nonzero(as_tuple=True)[0]
-        lens = maskable.to(torch.float32).sum(dim=1).clamp(min=1.0)  # (B,)
-        return (token_ce / lens[row]).sum() / float(B)
+        lens = (
+            maskable.to(device=logits.device, dtype=torch.float32)
+            .sum(dim=1)
+            .clamp(min=1.0)
+        )
+        return (token_ce.sum(dim=1) / lens).sum() / float(B)
     if norm == "masked":
-        return token_ce.sum() / float(masked_indices.sum().item())
+        return token_ce.sum() / masked_indices.sum().clamp(min=1).to(token_ce.dtype)
     return token_ce.sum()
 
 

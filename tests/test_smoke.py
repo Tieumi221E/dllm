@@ -31,8 +31,11 @@ from dllm import (
     generate_blockwise,
     generate_canvas,
     get_schedule,
+    masked_cross_entropy,
     mc_conditional_nll,
+    ppo_clip_objective,
     trajectory_logprobs,
+    trajectory_states,
 )
 from dllm.sampling.utils import get_num_transfer_tokens, split_steps
 
@@ -160,6 +163,37 @@ def test_loss_rejects_biased_combo():
     # uniform weighting with masked norm is fine
     loss = diffusion_loss(logits, ids, mi, None, norm="masked", importance_weight=False)
     assert torch.isfinite(loss)
+
+
+def test_masked_cross_entropy_composable_reductions():
+    logits = torch.randn(3, 5, V, requires_grad=True)
+    targets = torch.randint(0, V, (3, 5))
+    selected = torch.zeros(3, 5, dtype=torch.bool)
+    selected[0, :2] = True
+    selected[1, :4] = True
+    token_weight = torch.tensor([2.0, 0.5, 1.0]).unsqueeze(1)
+    sample_weight = torch.tensor([1.0, 3.0, 9.0])
+
+    dense = masked_cross_entropy(
+        logits,
+        targets,
+        selected,
+        token_weight=token_weight,
+        reduction="none",
+    )
+    row_mean = dense.sum(dim=1) / selected.sum(dim=1).clamp(min=1)
+    expected = (row_mean[0] + 3.0 * row_mean[1]) / 4.0
+    actual = masked_cross_entropy(
+        logits,
+        targets,
+        selected,
+        token_weight=token_weight,
+        sample_weight=sample_weight,
+        reduction="sample_mean",
+    )
+    assert torch.allclose(actual, expected)
+    actual.backward()
+    assert logits.grad is not None and torch.isfinite(logits.grad).all()
 
 
 # --------------------------------- model ---------------------------------- #
@@ -297,6 +331,33 @@ def test_canvas_modes_run():
     sm = tr.step_map
     assert all(s >= 0 for s in sm)
     assert math.isfinite(tr.content_logprob_mean(EOS))
+    restored = type(tr).from_dict(tr.to_dict())
+    assert restored.to_dict() == tr.to_dict()
+
+
+def test_trace_topk_and_summary():
+    model = tiny_model()
+    prompt = torch.randint(0, V, (1, 5))
+    out = generate_canvas(
+        model,
+        prompt,
+        MASK,
+        CanvasConfig(
+            gen_length=8,
+            block_length=4,
+            steps=4,
+            record_trace=True,
+            trace_topk=3,
+            eos_token_id=EOS,
+        ),
+    )
+    trace = out.traces[0]
+    assert trace.steps[0].distributions
+    assert len(trace.steps[0].distributions[0].topk) == 3
+    summary = trace.summary(EOS)
+    assert summary["commit_tokens"] == 8
+    assert summary["steps"] == len(trace.steps)
+    assert "pmax_mean" in summary and "margin_mean" in summary
 
 
 def test_canvas_prefix_cache_runs():
@@ -433,6 +494,46 @@ def test_trajectory_logprobs_partition():
         collapse="block",
     )
     assert len(steps_f) == 2
+
+    states = trajectory_states(
+        prompt[0],
+        gen,
+        sm,
+        MASK,
+        block_length=4,
+        canvas="incremental",
+        collapse="block",
+    )
+    assert len(states) == 2
+    assert states[0].input_ids.numel() == 5 + 4
+    assert states[1].input_ids.numel() == 5 + 8
+
+
+def test_trajectory_logprobs_gradient_and_ppo():
+    model = tiny_model()
+    prompt = torch.randint(0, V, (1, 3))
+    gen = torch.randint(0, V - 4, (4,))
+    step_map = torch.tensor([0, 0, 1, 1])
+    scored = trajectory_logprobs(
+        model,
+        prompt[0],
+        gen,
+        step_map,
+        MASK,
+        block_length=4,
+        canvas="full",
+        collapse="none",
+        with_grad=True,
+    )
+    logp = torch.cat([step.logp for step in scored])
+    old_logp = logp.detach() - 0.1
+    objective = ppo_clip_objective(logp, old_logp, advantage=1.0)
+    objective.loss.backward()
+    assert any(
+        parameter.grad is not None and torch.isfinite(parameter.grad).all()
+        for parameter in model.parameters()
+    )
+    assert objective.ratio_mean.item() > 1.0
 
 
 # ------------------------------- data / eval ------------------------------- #

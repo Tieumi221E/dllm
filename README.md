@@ -19,10 +19,16 @@ dllm/
                     HF wrapper
   sampling/         generate_canvas (full canvas) / generate_blockwise
                     (incremental block decoding) / trajectory recording
-  rl.py             trajectory_logprobs (canvas-consistent reconstruction)
+  rl.py             trajectory state reconstruction + differentiable PPO primitives
   presets.py        regime presets (small-mha / small-gqa / llada-8b)
-tests/test_smoke.py 19 tests incl. numeric equality with the reference loss code
+docs/architecture.md capability boundaries and admission policy
+tests/test_smoke.py focused semantic and numerical tests
 ```
+
+The long-term package boundary and support tiers are described in
+[Architecture](docs/architecture.md). The stable core owns reusable dLLM
+mechanisms; model/framework integrations are adapters, while datasets,
+task-specific rewards, and complete experiment loops stay downstream.
 
 ## Install
 
@@ -110,14 +116,21 @@ steps = trajectory_logprobs(lambda ids: model(ids), prompt, out.canvas[0, Lp:],
                             canvas="incremental")   # MUST match the rollout regime
 ```
 
+Pass `with_grad=True` when the returned log-probabilities are part of a policy
+objective. `trajectory_states(...)` exposes the model-free reconstruction
+separately, and `ppo_clip_objective(...)` provides the token-level clipped PPO
+term without taking ownership of backward or optimizer steps.
+
 ### Trajectory data for constrained-order training
 
 ```python
 out = generate_canvas(model, prompt, MASK,
-                      CanvasConfig(..., temperature=0.6, record_trace=True))
+                      CanvasConfig(..., temperature=0.6, record_trace=True,
+                                   trace_topk=8))
 traj = out.traces[0]
 traj.content_logprob_mean(EOS)   # ELBO-proxy selection score
 traj.step_map                    # commit order -> (x_t, x_0) training pairs
+traj.summary(EOS)                # rollout progress/confidence/log-prob stats
 ```
 
 ## Switch reference
@@ -158,11 +171,12 @@ traj.step_map                    # commit order -> (x_t, x_0) training pairs
 
 ## Verification
 
-`python tests/test_smoke.py` - 19 tests, including numeric equality with the
+`python tests/test_smoke.py` - focused tests including numeric equality with the
 reference loss implementation (pretraining + SFT normalizations), KV-cache ==
 explicit block-causal forward (learned & RoPE), cache-on/off generation
-equality, and exact recovery of log V by the MC likelihood estimator on a
-uniform-logits model.
+equality, trajectory serialization and differentiable policy scoring, and
+exact recovery of log V by the MC likelihood estimator on a uniform-logits
+model.
 
 ## References
 
