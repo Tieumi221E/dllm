@@ -25,7 +25,13 @@ from typing import Any, List, Optional, Sequence
 import torch
 import torch.nn.functional as F
 
-from ..models.protocol import PrefixCacheDenoiser, extract_logits
+from ..models.protocol import (
+    Denoiser,
+    DenoiserInput,
+    PrefixCacheDenoiser,
+    extract_logits,
+)
+from ..topology import AttentionTopology
 from .policies import (
     CommitPolicy,
     CommitSpec,
@@ -82,12 +88,42 @@ class CanvasOutput:
 
 
 def _model_logits(model, ids, attention_mask=None):
+    if isinstance(model, Denoiser):
+        valid = (
+            attention_mask.bool()
+            if attention_mask is not None
+            else torch.ones_like(ids, dtype=torch.bool)
+        )
+        output = model.denoise(
+            DenoiserInput(
+                input_ids=ids,
+                attention_mask=attention_mask,
+                topology=AttentionTopology.bidirectional(valid),
+            )
+        )
+        return output.logits
     out = (
         model(ids)
         if attention_mask is None
         else model(ids, attention_mask=attention_mask)
     )
     return extract_logits(out)
+
+
+def _validate_canvas_capabilities(model) -> None:
+    if not isinstance(model, Denoiser):
+        return
+    capabilities = model.capabilities
+    if (
+        capabilities.prediction_fields
+        and "same_position" not in capabilities.prediction_fields
+    ):
+        raise TypeError("full-canvas generation requires same-position logits")
+    if (
+        capabilities.attention_topologies
+        and "bidirectional" not in capabilities.attention_topologies
+    ):
+        raise TypeError("full-canvas generation requires bidirectional attention")
 
 
 @torch.no_grad()
@@ -115,6 +151,7 @@ def generate_canvas(
         cfg = dataclass_replace(cfg, **overrides)
     if cfg.steps <= 0:
         raise ValueError("steps must be positive")
+    _validate_canvas_capabilities(model)
     policy: CommitPolicy = resolve_commit_policy(
         cfg.commit, threshold=cfg.threshold
     )

@@ -9,6 +9,12 @@ The boundary is intentional. A small core makes semantic differences visible
 and testable, while adapters can support fast-moving model and serving stacks
 without making them mandatory dependencies.
 
+The resulting relationship is an extension layer over the established
+PyTorch/Transformers ecosystem. Frameworks continue to own pretrained model
+loading, distributed optimization, device placement, quantization, and
+production serving; `dllm` owns diffusion-specific objectives, topology,
+state transitions, cache provenance, and generation policies.
+
 ## Layers
 
 | Layer | Stable responsibility | Extension direction |
@@ -85,6 +91,23 @@ class. `BlockCacheDenoiser` defines exact ordered-prefix cache construction
 and block extension; `PrefixCacheDenoiser` additionally defines explicit
 approximate prefix construction for a changing bidirectional canvas.
 
+### Framework-adapter contract
+
+An adapter must declare the model's prediction field and default attention
+topology. Same-position prediction may enter full-canvas denoising;
+next-token prediction may enter the generic execution boundary and causal
+verification, but is rejected by diffusion canvas sampling.
+
+The generic Transformers adapter maps supported inputs and normalizes logits,
+cache, hidden states, and auxiliary outputs. It does not modify weights,
+rewrite attention, or claim framework-native caches are exact. Unsupported
+logical positions, topology changes, or cache operations fail unless a
+model-specific hook implements them.
+
+Framework cache compatibility is more than accepting a `past_key_values`
+argument. Exact adapters must preserve padding validity, logical cache
+positions, ordered groups, crop semantics, and exactness provenance.
+
 ### Topology contract
 
 `AttentionTopology` is an ordered partition. A query in group `g` attends to
@@ -142,6 +165,14 @@ approximation because cached prefix states are not recomputed after the
 active block changes. `build_approximate_prefix_cache` makes that model-owned
 choice explicit. `KVCache.semantics` declares the provenance, while cached key
 validity, positions, and ordered group IDs travel with the tensors.
+
+### Preset contract
+
+Presets are organized along independent `model`, `recipe`, and `integration`
+axes. Composition recursively merges non-conflicting fields and rejects
+conflicts unless the caller supplies an explicit override. Each preset carries
+category, stability, and requirement metadata so examples do not silently
+become support claims. Legacy complete presets remain unchanged.
 
 ### Self-speculation contract
 
