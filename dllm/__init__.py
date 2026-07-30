@@ -1,7 +1,7 @@
 """dllm - a self-contained masked-diffusion LM toolkit.
 
 Training :  schedules / forward_process / diffusion_loss / collators
-Inference:  generate_canvas (full canvas) / generate_blockwise (incremental)
+Inference:  full-canvas / incremental / self-speculative generation
 Evaluation: mc_conditional_nll
 RL:         trajectory_logprobs (canvas-consistent state reconstruction)
 Models:     topology-aware DiffusionTransformer, denoiser protocol, HF wrapper
@@ -9,7 +9,7 @@ Models:     topology-aware DiffusionTransformer, denoiser protocol, HF wrapper
 References for the algorithms are listed in the README.
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 from .schedules import NoiseSchedule, LinearSchedule, CosineSchedule, get_schedule
 from .masking import MaskingOutput, forward_process, make_labels, random_truncate
@@ -33,6 +33,21 @@ from .sampling import (
     BlockwiseConfig,
     BlockwiseOutput,
     generate_blockwise,
+    CommitDecision,
+    CommitPolicy,
+    CommitSpec,
+    CommitState,
+    QuotaCommitPolicy,
+    ThresholdCommitPolicy,
+    apply_commit_policy,
+    resolve_commit_policy,
+    SelfSpecBackend,
+    SelfSpecConfig,
+    SelfSpecOutput,
+    SelfSpecStats,
+    SelfSpecStep,
+    TopologySelfSpecBackend,
+    generate_self_speculative,
     TrajectorySample,
     TrajectoryStep,
     TokenDistribution,
@@ -87,6 +102,21 @@ __all__ = [
     "BlockwiseConfig",
     "BlockwiseOutput",
     "generate_blockwise",
+    "CommitDecision",
+    "CommitPolicy",
+    "CommitSpec",
+    "CommitState",
+    "QuotaCommitPolicy",
+    "ThresholdCommitPolicy",
+    "apply_commit_policy",
+    "resolve_commit_policy",
+    "SelfSpecBackend",
+    "SelfSpecConfig",
+    "SelfSpecOutput",
+    "SelfSpecStats",
+    "SelfSpecStep",
+    "TopologySelfSpecBackend",
+    "generate_self_speculative",
     "TrajectorySample",
     "TrajectoryStep",
     "TokenDistribution",

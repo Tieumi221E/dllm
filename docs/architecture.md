@@ -17,7 +17,7 @@ without making them mandatory dependencies.
 | Objective | Token losses, MDLM importance weighting, explicit reductions | Block-diffusion and learned-schedule estimators |
 | Model | Denoiser protocol, prediction field, explicit positions, reference transformer | Checkpoint and framework adapters |
 | Topology | Ordered attention groups independent of tensor layout | Sparse, edit-aware, and multimodal dependency compilers |
-| Sampling | Full-canvas and incremental block generation, proposal and commit policies | Stochastic position policies, speculative decoding |
+| Sampling | Full-canvas, incremental, and linear self-speculative generation; explicit proposal and commit policies | Learned position policies and batched speculation |
 | Execution | Exact block-causal cache and documented approximate prefix cache | Hierarchical and adaptive cache adapters |
 | Trajectory | Token actions, commit order, optional predictive distributions | Position-action probabilities and distillation targets |
 | Post-training | State reconstruction and differentiable PPO primitives | GRPO/DPO adapters without task-specific rewards |
@@ -38,12 +38,14 @@ The package currently treats these regimes explicitly:
   denoised in parallel within a block.
 - **Block-causal diffusion** (BD3LM-style): prefix blocks cannot attend to the
   active block, which permits exact inter-block KV caching.
+- **Linear self-speculation**: one model drafts with block-bidirectional
+  attention and verifies causally, preserving the verifier's greedy sequence.
 
 Several active directions fit the architecture but are not yet stable APIs:
 
 - cache-native AR-to-diffusion conversion and models that switch among causal,
   block-causal, and bidirectional modes;
-- adaptive or hierarchical caching and speculative block decoding;
+- adaptive or hierarchical caching and paged/ragged speculative batching;
 - trajectory distillation and learned parallel-decoding policies;
 - edit processes with insertion and deletion;
 - multimodal block diffusion.
@@ -106,6 +108,20 @@ Training, rollout, and policy scoring must use the same canvas regime:
 
 Changing this contract changes model logits, not just runtime performance.
 
+### Commit-policy contract
+
+Candidate-token sampling, confidence estimation, and position selection are
+separate operations. A `CommitPolicy` receives confidence, the current
+candidate mask, the block's initial mask, and step metadata. It returns a
+boolean commit mask plus an optional per-sample selection-action
+log-probability.
+
+Every policy must select only current candidates and make progress for each
+active sample. The sampler validates both invariants. `QuotaCommitPolicy` and
+`ThresholdCommitPolicy` implement the established transfer and confidence
+threshold rules; custom stochastic or learned policies use the same boundary
+without entering sampler control flow.
+
 ### Cache contract
 
 A cache implementation must declare whether it is:
@@ -119,6 +135,20 @@ Full-canvas prefix caching is an approximation because cached prefix states
 are not recomputed after the active block changes. `KVCache.semantics`
 declares this provenance, while cached key validity, positions, and ordered
 group IDs travel with the tensors.
+
+### Self-speculation contract
+
+`generate_self_speculative` owns only the model-independent state machine:
+causal seed, diffusion draft, causal verification, longest matching prefix,
+one verifier token, and rejected-cache cropping. A `SelfSpecBackend` owns
+attention-mode switching, prediction-field alignment, optional adapter
+routing, and framework cache operations.
+
+The accepted output is the backend's greedy causal sequence under identical
+token suppression and stopping. Draft randomness may change acceptance and
+NFE but not emitted tokens. The reference topology backend is deliberately
+batch-1 until variable accepted lengths can be represented without padding
+away cache semantics.
 
 ### Trajectory contract
 
@@ -159,7 +189,8 @@ The architecture is checked against several distinct implementation lines:
   cache-compatible attention, and parallel decoding;
 - [LLaDA 2.0](https://github.com/inclusionAI/LLaDA2.0) and
   [Nemotron-Labs-Diffusion](https://github.com/NVlabs/Nemotron-Labs-Diffusion)
-  for AR conversion and multi-mode attention;
+  for AR conversion, multi-mode attention, and single-model
+  self-speculation;
 - [d3LLM](https://github.com/hao-ai-lab/d3LLM) for trajectory distillation;
 - [Mask-Aware Policy Gradients](https://arxiv.org/abs/2607.15200) for the
   distinction between token and position-selection actions;

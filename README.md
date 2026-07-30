@@ -19,8 +19,8 @@ dllm/
   execution.py      exactness metadata shared by cache implementations
   models/           topology-aware DiffusionTransformer, denoiser protocol,
                     exact block-causal KV cache, HF wrapper
-  sampling/         generate_canvas (full canvas) / generate_blockwise
-                    (incremental block decoding) / trajectory recording
+  sampling/         full-canvas / incremental / self-speculative generation,
+                    commit policies, and trajectory recording
   rl.py             trajectory state reconstruction + differentiable PPO primitives
   presets.py        regime presets (small-mha / small-gqa / llada-8b)
 docs/architecture.md capability boundaries and admission policy
@@ -144,6 +144,43 @@ prefix cache), `commit="threshold", threshold=0.9` (confidence-threshold
 parallel decoding), or `generate_blockwise(...)` for truncated-canvas models
 (exact KV cache, per-sample EOS early exit).
 
+Quota and threshold are built-in `CommitPolicy` implementations rather than
+sampler branches. `commit="transfer"` and `commit="threshold"` remain stable
+shorthands; a custom policy can return a `CommitDecision` with an optional
+position-selection log-probability for trajectory learning.
+
+### Linear self-speculation
+
+Hybrid checkpoints that support causal next-token prediction and
+bidirectional within-block drafting can use the same weights for both:
+
+```python
+from dllm import (
+    SelfSpecConfig,
+    TopologySelfSpecBackend,
+    generate_self_speculative,
+)
+
+backend = TopologySelfSpecBackend(model, draft_shift=True)
+out = generate_self_speculative(
+    backend,
+    prompt_ids,
+    MASK,
+    SelfSpecConfig(max_new_tokens=256, block_length=32),
+)
+print(out.sequences[0], out.stats.draft_acceptance)
+```
+
+The default is a one-pass diffusion draft
+(`commit="threshold", threshold=0.0`). Every block is then checked causally;
+only the longest matching prefix plus one verifier token is accepted. The
+emitted sequence therefore equals the backend's greedy causal sequence under
+the same token-suppression and stopping rules. Model-specific attention
+switches, LoRA routing, and framework cache types belong in a
+`SelfSpecBackend`, not in the orchestration loop. The reference backend
+currently requires batch size 1 because exact variable-length acceptance
+needs a ragged or paged cache for batching.
+
 ### Likelihood evaluation
 
 ```python
@@ -190,7 +227,7 @@ traj.summary(EOS)                # rollout progress/confidence/log-prob stats
 | t sampling | uniform, always | - (non-uniform t without re-weighting is not a likelihood bound; use a schedule instead) |
 | min_one_mask | off | on (tiny-batch efficiency; slight bias) |
 | EOS in SFT | maskable, learnable, counted | `non_maskable_ids` (EOS-collapse mitigation for tiny models) |
-| commit | `"transfer"` (top-k quota) | `"threshold"` (parallel decoding) |
+| commit | `"transfer"` (top-k quota) | `"threshold"` (parallel decoding), custom `CommitPolicy` |
 | temperature | `"gumbel"` fp64 | `"multinomial"` = softmax(logits/T) (different distribution at T!=1) |
 | confidence | `"prob"` raw-softmax | `"margin"`, `"neg_entropy"`, `"random"` |
 | canvas | full canvas (`generate_canvas`) | incremental (`generate_blockwise`) - truncated-canvas regime |
@@ -220,6 +257,9 @@ traj.summary(EOS)                # rollout progress/confidence/log-prob stats
 - **No silent failures**: position overflow raises instead of clamping;
   padded prompts carry their mask through the KV cache; the mask token is
   never predictable unless explicitly allowed.
+- **Draft/verify exactness**: self-speculative drafts may be stochastic, but
+  accepted tokens are causal-verifier tokens. Cache cropping discards every
+  rejected suffix instead of allowing a draft to leak into later steps.
 
 ## Verification
 
@@ -228,8 +268,9 @@ reference loss implementation (pretraining + SFT normalizations), ordered
 topology == explicit attention masks, multi-block KV-cache == full topology
 recomputation (learned & RoPE), padding invariance with explicit positions,
 cache-on/off generation equality, trajectory serialization and differentiable
-policy scoring, and exact recovery of log V by the MC likelihood estimator on
-a uniform-logits model.
+policy scoring, custom commit-policy actions, self-speculation equality with
+greedy causal decoding, and exact recovery of log V by the MC likelihood
+estimator on a uniform-logits model.
 
 ## References
 
@@ -251,6 +292,9 @@ switch table above.
   [arXiv:2505.22618](https://arxiv.org/abs/2505.22618);
   [NVlabs/Fast-dLLM](https://github.com/NVlabs/Fast-dLLM).
   Confidence-threshold parallel decoding; block-level caching.
+- **Nemotron-Labs-Diffusion** -
+  [NVlabs/Nemotron-Labs-Diffusion](https://github.com/NVlabs/Nemotron-Labs-Diffusion).
+  Single-model causal/diffusion mode switching and linear self-speculation.
 - **dllm** - [ZHZisZZ/dllm](https://github.com/ZHZisZZ/dllm).
   Schedule/weight formulation (w(t) = -alpha'/(1-alpha)) and normalization options.
 - Low-precision Gumbel-max degradation (float64 rationale):

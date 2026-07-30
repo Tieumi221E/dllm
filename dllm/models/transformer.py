@@ -189,6 +189,33 @@ class KVCache:
             semantics=self.semantics,
         )
 
+    def crop(self, length: int) -> "KVCache":
+        """Return the prefix of this cache without mutating the original."""
+        if length < 0 or length > self.length:
+            raise ValueError(
+                f"cache crop length must be in [0, {self.length}]"
+            )
+        return KVCache(
+            kvs=[
+                (key[:, :, :length], value[:, :, :length])
+                for key, value in self.kvs
+            ],
+            key_mask=(
+                None if self.key_mask is None else self.key_mask[:, :length]
+            ),
+            position_ids=(
+                None
+                if self.position_ids is None
+                else self.position_ids[:, :length]
+            ),
+            group_ids=(
+                None
+                if self.group_ids is None
+                else self.group_ids[:, :length]
+            ),
+            semantics=self.semantics,
+        )
+
 
 def _cache_valid(cache: KVCache, batch: int, device: torch.device) -> torch.Tensor:
     if cache.key_mask is not None:

@@ -23,17 +23,19 @@ import torch
 
 from ..models.transformer import DiffusionTransformer
 from ..topology import AttentionTopology
+from .policies import (
+    CommitPolicy,
+    CommitSpec,
+    CommitState,
+    apply_commit_policy,
+    resolve_commit_policy,
+)
 from .utils import (
     confidence_scores,
-    get_num_transfer_tokens,
     sample_candidates,
-    select_threshold_commits,
-    select_topk_commits,
     strip_after_eos,
     suppress_tokens_,
 )
-
-_COMMITS = ("transfer", "threshold")
 
 
 @dataclass
@@ -43,7 +45,7 @@ class BlockwiseConfig:
     steps_per_block: int = 16
     temperature: float = 0.0
     sampling: str = "gumbel"  # "gumbel" | "multinomial"
-    commit: str = "transfer"
+    commit: CommitSpec = "transfer"
     confidence: str = "prob"
     threshold: float = 0.9
     allow_mask_prediction: bool = False
@@ -99,8 +101,11 @@ def generate_blockwise(
         num_samples: if given and prompt is a single row, replicate it.
     """
     cfg = config or BlockwiseConfig()
-    if cfg.commit not in _COMMITS:
-        raise ValueError(f"commit must be one of {_COMMITS}")
+    if cfg.steps_per_block <= 0:
+        raise ValueError("steps_per_block must be positive")
+    policy: CommitPolicy = resolve_commit_policy(
+        cfg.commit, threshold=cfg.threshold
+    )
     if prompt_ids.dim() == 1:
         prompt_ids = prompt_ids.unsqueeze(0)
     if num_samples is not None and prompt_ids.shape[0] == 1:
@@ -144,23 +149,22 @@ def generate_blockwise(
             blk_x = torch.full(
                 (nb, actual), mask_token_id, dtype=torch.long, device=device
             )
-            quota = get_num_transfer_tokens(
-                torch.ones(nb, actual, dtype=torch.bool, device=device),
-                cfg.steps_per_block,
+            initial_mask = torch.ones(
+                nb, actual, dtype=torch.bool, device=device
             )
             cache_act = cache.index_select(act_idx) if cfg.use_cache else None
             prefix_act = prefix_no_cache[act_idx] if not cfg.use_cache else None
 
             i = 0
-            max_iters = (
-                cfg.steps_per_block
-                if cfg.commit != "threshold"
-                else actual + cfg.steps_per_block
-            )
-            while i < max_iters:
+            max_iters = actual
+            while True:
                 masked = blk_x == mask_token_id
                 if not masked.any():
                     break
+                if i >= max_iters:
+                    raise RuntimeError(
+                        "commit policy exceeded the progress bound"
+                    )
 
                 if cfg.use_cache:
                     logits, _ = model.forward_block(blk_x, cache_act)
@@ -180,13 +184,17 @@ def generate_blockwise(
                 x0 = sample_candidates(logits, cfg.temperature, cfg.sampling, generator)
                 conf = confidence_scores(logits, x0, cfg.confidence, generator).float()
 
-                cand = conf.masked_fill(~masked, float("-inf"))
-                if cfg.commit == "transfer":
-                    commit = select_topk_commits(
-                        cand, quota[:, min(i, cfg.steps_per_block - 1)]
-                    )
-                else:
-                    commit = select_threshold_commits(cand, cfg.threshold)
+                decision = apply_commit_policy(
+                    policy,
+                    CommitState(
+                        confidence=conf,
+                        candidates=masked,
+                        initial_mask=initial_mask,
+                        step=i,
+                        steps=cfg.steps_per_block,
+                    ),
+                )
+                commit = decision.commit
                 blk_x = torch.where(commit, x0, blk_x)
                 gpos = step_map[act_idx, blk * BL : blk * BL + actual]
                 gpos[commit] = global_step

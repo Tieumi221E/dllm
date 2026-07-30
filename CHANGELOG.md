@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.3.0
+
+Version 1.3 separates generation decisions from sampler control flow and adds
+a model-independent linear self-speculation state machine.
+
+### Added
+
+- `CommitPolicy`, `CommitState`, and `CommitDecision` contracts.
+- `QuotaCommitPolicy` and `ThresholdCommitPolicy` built-in strategies.
+- Optional position-selection action log-probabilities from custom policies
+  into recorded trajectories.
+- `SelfSpecBackend` and `generate_self_speculative` for causal
+  seed/draft/verify/accept orchestration.
+- `TopologySelfSpecBackend`, a reference backend for the topology-aware
+  `DiffusionTransformer`.
+- Non-mutating `KVCache.crop(...)` with provenance preservation.
+
+### Changed
+
+- Full-canvas and incremental samplers now share the same commit-policy path.
+- `CanvasConfig.commit` and `BlockwiseConfig.commit` accept custom policy
+  objects in addition to string shorthands.
+- Invalid zero-step configurations and policies that stall or select
+  non-candidate positions now raise explicit errors.
+
+### Compatibility
+
+- `"transfer"` and `"threshold"` retain their 1.2 behavior and defaults.
+- Existing sampler outputs, model state dictionaries, and downstream import
+  paths are unchanged.
+- Self-speculation is opt-in and adds no framework dependency.
+
 ## 1.2.0
 
 Version 1.2 makes dependency structure and model execution explicit without
