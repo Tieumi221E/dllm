@@ -15,8 +15,10 @@ dllm/
   masking.py        forward noising process + random-length trick
   loss.py           diffusion_loss (explicit normalizations) + MC likelihood
   data.py           PretrainCollator / SFTCollator / BlockSFTCollator
-  models/           DiffusionTransformer (MHA|GQA x learned|RoPE, exact KV cache),
-                    HF wrapper
+  topology.py       ordered bidirectional / causal / block-causal dependencies
+  execution.py      exactness metadata shared by cache implementations
+  models/           topology-aware DiffusionTransformer, denoiser protocol,
+                    exact block-causal KV cache, HF wrapper
   sampling/         generate_canvas (full canvas) / generate_blockwise
                     (incremental block decoding) / trajectory recording
   rl.py             trajectory state reconstruction + differentiable PPO primitives
@@ -29,6 +31,7 @@ The long-term package boundary and support tiers are described in
 [Architecture](docs/architecture.md). The stable core owns reusable dLLM
 mechanisms; model/framework integrations are adapters, while datasets,
 task-specific rewards, and complete experiment loops stay downstream.
+See [Changelog](CHANGELOG.md) for versioned API changes.
 
 ## Install
 
@@ -70,7 +73,7 @@ from dllm import BlockSFTCollator
 collator = BlockSFTCollator(MASK, EOS, PAD, block_length=32,
                             canvas="truncated")   # or "full"
 batch = collator(samples)
-loss = diffusion_loss(model(batch["input_ids"]).logits, batch["clean_ids"],
+loss = diffusion_loss(model(batch["input_ids"]), batch["clean_ids"],
                       batch["masked_indices"], batch["p_mask"],
                       norm="answer", maskable=batch["maskable"])   # bound-consistent
 # uniform weighting variant: diffusion_loss(..., importance_weight=False,
@@ -78,7 +81,51 @@ loss = diffusion_loss(model(batch["input_ids"]).logits, batch["clean_ids"],
 ```
 
 To make the truncated regime exactly KV-cache-consistent at inference, train
-with the staircase attention bias: `from dllm.sampling import block_causal_bias`.
+with an ordered block topology:
+
+```python
+from dllm import AttentionTopology
+
+topology = AttentionTopology.from_boundaries(
+    [prompt_length, prompt_length + 32, prompt_length + 64],
+    length=batch["input_ids"].shape[1],
+    batch_size=batch["input_ids"].shape[0],
+    device=batch["input_ids"].device,
+)
+logits = model(batch["input_ids"], topology=topology)
+```
+
+`dllm.sampling.block_causal_bias` remains as a compatibility wrapper for
+training code that expects a raw additive mask.
+
+### Attention and model contracts
+
+```python
+from dllm import AttentionTopology, DenoiserInput
+
+# Same model, different dependency structure. Tokens inside one group are
+# bidirectional; a query in group g sees keys in groups <= g.
+topology = AttentionTopology.block_causal(
+    block_size=32, batch_size=input_ids.shape[0],
+    length=input_ids.shape[1], device=input_ids.device,
+)
+position_ids = logical_positions  # independent of padded tensor columns
+logits = model(input_ids, position_ids=position_ids, topology=topology)
+
+# Framework-neutral structured output and capability discovery.
+out = model.denoise(DenoiserInput(
+    input_ids=input_ids,
+    position_ids=position_ids,
+    topology=topology,
+    use_cache=True,
+))
+print(model.capabilities, out.logits.shape, out.cache.semantics)
+```
+
+`AttentionTopology.bidirectional`, `.causal`, `.block_causal`, and
+`.from_boundaries` compile to the same low-level SDPA mask contract.
+`forward` still returns a logits tensor by default, and `return_kvs=True`
+still returns the 1.1 `(logits, kvs)` tuple.
 
 ### Sampling
 
@@ -101,7 +148,7 @@ parallel decoding), or `generate_blockwise(...)` for truncated-canvas models
 
 ```python
 from dllm import mc_conditional_nll
-r = mc_conditional_nll(lambda ids: model(ids).logits, prompt, response, MASK,
+r = mc_conditional_nll(lambda ids: model(ids), prompt, response, MASK,
                        num_samples=128)
 print(r["nll_per_token"])
 ```
@@ -148,6 +195,7 @@ traj.summary(EOS)                # rollout progress/confidence/log-prob stats
 | confidence | `"prob"` raw-softmax | `"margin"`, `"neg_entropy"`, `"random"` |
 | canvas | full canvas (`generate_canvas`) | incremental (`generate_blockwise`) - truncated-canvas regime |
 | blockwise attention | block-causal (KV cache exact; `use_cache` is speed-only) | - |
+| topology | bidirectional ordered group 0 | causal, fixed block, arbitrary ordered boundaries, raw mask escape hatch |
 | positions | `"learned"` | `"rope"` (recommended for new training) |
 | attention | GQA (`num_kv_heads`) or MHA; optional `attn_bias`/`ff_bias` | |
 
@@ -164,7 +212,11 @@ traj.summary(EOS)                # rollout progress/confidence/log-prob stats
 - **Cache honesty**: `generate_blockwise`'s cache is exact (block-causal by
   construction, tested against an explicit staircase mask);
   `generate_canvas(prefix_cache=True)` is a windowed approximation of the
-  fully bidirectional canvas - documented as such.
+  fully bidirectional canvas. Cache objects carry this exact/approximate
+  provenance instead of hiding a semantic change behind a speed flag.
+- **Dependency vs layout**: logical positions, padding, and attention groups
+  are separate tensors. Left padding or a future edit process therefore does
+  not need to pretend that physical columns are semantic positions.
 - **No silent failures**: position overflow raises instead of clamping;
   padded prompts carry their mask through the KV cache; the mask token is
   never predictable unless explicitly allowed.
@@ -172,11 +224,12 @@ traj.summary(EOS)                # rollout progress/confidence/log-prob stats
 ## Verification
 
 `python tests/test_smoke.py` - focused tests including numeric equality with the
-reference loss implementation (pretraining + SFT normalizations), KV-cache ==
-explicit block-causal forward (learned & RoPE), cache-on/off generation
-equality, trajectory serialization and differentiable policy scoring, and
-exact recovery of log V by the MC likelihood estimator on a uniform-logits
-model.
+reference loss implementation (pretraining + SFT normalizations), ordered
+topology == explicit attention masks, multi-block KV-cache == full topology
+recomputation (learned & RoPE), padding invariance with explicit positions,
+cache-on/off generation equality, trajectory serialization and differentiable
+policy scoring, and exact recovery of log V by the MC likelihood estimator on
+a uniform-logits model.
 
 ## References
 

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dllm"
-version = "1.1.0"
-description = "Self-contained LLaDA-style masked diffusion LM toolkit: training, inference, evaluation, RL utilities"
+version = "1.2.0"
+description = "Composable discrete diffusion language model toolkit for training, inference, evaluation, and post-training"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"

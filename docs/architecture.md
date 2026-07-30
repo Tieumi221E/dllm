@@ -15,7 +15,8 @@ without making them mandatory dependencies.
 |---|---|---|
 | Process | Time schedules, mask corruption, maskable regions | Structured and non-absorbing corruption |
 | Objective | Token losses, MDLM importance weighting, explicit reductions | Block-diffusion and learned-schedule estimators |
-| Model | Reference transformer, attention bias, position handling | Protocols for Hugging Face and cache-native models |
+| Model | Denoiser protocol, prediction field, explicit positions, reference transformer | Checkpoint and framework adapters |
+| Topology | Ordered attention groups independent of tensor layout | Sparse, edit-aware, and multimodal dependency compilers |
 | Sampling | Full-canvas and incremental block generation, proposal and commit policies | Stochastic position policies, speculative decoding |
 | Execution | Exact block-causal cache and documented approximate prefix cache | Hierarchical and adaptive cache adapters |
 | Trajectory | Token actions, commit order, optional predictive distributions | Position-action probabilities and distillation targets |
@@ -64,6 +65,35 @@ controls token weights, sample weights, and reduction, so constrained
 trajectory training and legacy objectives can share the implementation
 without being mislabeled as an ELBO.
 
+### Model contract
+
+A denoiser consumes token IDs or embeddings, logical position IDs, an
+attention topology, and optional execution state. It returns a prediction
+field (`logits`) plus optional cache and auxiliary data. It does not own the
+noise schedule, commit policy, EOS handling, reward, or optimizer.
+
+`DenoiserInput`, `DenoiserOutput`, and `ModelCapabilities` are the
+framework-neutral boundary. The reference `DiffusionTransformer` implements
+that boundary while preserving its tensor-returning 1.1 `forward` API.
+Adapters may expose framework-native outputs as long as `extract_logits`
+normalizes the prediction field.
+
+### Topology contract
+
+`AttentionTopology` is an ordered partition. A query in group `g` attends to
+keys in groups `<= g`, while tokens in one group remain bidirectional. This
+single invariant expresses:
+
+- bidirectional diffusion (all tokens in group 0);
+- causal attention (one increasing group per token);
+- block-causal attention (one increasing group per block);
+- prefix-LM and arbitrary ordered segments (caller-supplied groups).
+
+Padding is composed through `valid`; `position_ids` are independent logical
+coordinates. Raw `attn_bias` remains a low-level escape hatch, but cannot be
+combined with a topology because doing so would make dependency provenance
+ambiguous.
+
 ### Canvas contract
 
 Training, rollout, and policy scoring must use the same canvas regime:
@@ -86,7 +116,9 @@ A cache implementation must declare whether it is:
 
 `build_kv_cache` plus `forward_block` is exact for block-causal attention.
 Full-canvas prefix caching is an approximation because cached prefix states
-are not recomputed after the active block changes.
+are not recomputed after the active block changes. `KVCache.semantics`
+declares this provenance, while cached key validity, positions, and ordered
+group IDs travel with the tensors.
 
 ### Trajectory contract
 

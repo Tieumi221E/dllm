@@ -4,18 +4,28 @@ Training :  schedules / forward_process / diffusion_loss / collators
 Inference:  generate_canvas (full canvas) / generate_blockwise (incremental)
 Evaluation: mc_conditional_nll
 RL:         trajectory_logprobs (canvas-consistent state reconstruction)
-Models:     DiffusionTransformer (MHA/GQA x learned/RoPE, KV cache), HF wrapper
+Models:     topology-aware DiffusionTransformer, denoiser protocol, HF wrapper
 
 References for the algorithms are listed in the README.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 from .schedules import NoiseSchedule, LinearSchedule, CosineSchedule, get_schedule
 from .masking import MaskingOutput, forward_process, make_labels, random_truncate
 from .loss import diffusion_loss, masked_cross_entropy, mc_conditional_nll
 from .data import PretrainCollator, SFTCollator, BlockSFTCollator
-from .models import DiffusionTransformer, KVCache
+from .topology import AttentionTopology, ordered_attention_mask
+from .execution import CacheSemantics, EXACT_BLOCK_CAUSAL
+from .models import (
+    Denoiser,
+    DenoiserInput,
+    DenoiserOutput,
+    DiffusionTransformer,
+    KVCache,
+    ModelCapabilities,
+    extract_logits,
+)
 from .sampling import (
     CanvasConfig,
     CanvasOutput,
@@ -59,8 +69,17 @@ __all__ = [
     "SFTCollator",
     "BlockSFTCollator",
     # models
+    "AttentionTopology",
+    "ordered_attention_mask",
+    "CacheSemantics",
+    "EXACT_BLOCK_CAUSAL",
+    "Denoiser",
+    "DenoiserInput",
+    "DenoiserOutput",
     "DiffusionTransformer",
     "KVCache",
+    "ModelCapabilities",
+    "extract_logits",
     # sampling
     "CanvasConfig",
     "CanvasOutput",

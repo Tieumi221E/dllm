@@ -25,6 +25,8 @@ from typing import Callable, List, Union
 import torch
 import torch.nn.functional as F
 
+from .models.protocol import extract_logits
+
 
 @dataclass
 class StepLogProb:
@@ -157,8 +159,7 @@ def trajectory_states(
 
 
 def _model_logits(model_fn, input_ids: torch.Tensor) -> torch.Tensor:
-    output = model_fn(input_ids)
-    return output.logits if hasattr(output, "logits") else output
+    return extract_logits(model_fn(input_ids))
 
 
 def score_trajectory_states(
