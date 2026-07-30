@@ -402,6 +402,7 @@ class DiffusionTransformer(nn.Module):
         cache_semantics=frozenset(
             {"exact_ordered", "exact_block_causal"}
         ),
+        prediction_fields=frozenset({"same_position"}),
     )
 
     def __init__(

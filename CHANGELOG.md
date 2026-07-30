@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.3.2
+
+Version 1.3.2 establishes `dllm` as a diffusion-specific extension layer over
+the mature PyTorch/Transformers ecosystem.
+
+### Added
+
+- `TransformersDenoiserAdapter`, an optional-dependency-free bridge for
+  already diffusion-capable Transformers models with explicit prediction-field
+  and topology capabilities.
+- Executable denoiser and cache-contract validation helpers.
+- Composable `model`, `recipe`, and `integration` presets with discovery
+  metadata, conflict detection, and explicit overrides.
+- Adapter, preset, optional Transformers, and multi-version CI coverage.
+
+### Changed
+
+- Full-canvas sampling uses the structured denoiser boundary when a model
+  implements it, while preserving the raw callable path.
+- Reference model capabilities now declare same-position prediction.
+- Presets cover reference MHA/GQA/RoPE models, MDLM/SFT/transfer/threshold/
+  semi-AR/cache/self-speculation/trajectory recipes, and LLaDA integration.
+- Project documentation now distinguishes the algorithm kernel from model
+  loading, distributed training, and serving infrastructure.
+
+### Compatibility
+
+- `small-mha`, `small-gqa`, and `llada-8b` retain their exact configuration
+  values.
+- Existing callable models and all 1.3.1 training, generation, and trajectory
+  schemas remain supported.
+- The adapter does not add a mandatory Transformers dependency and does not
+  claim to convert autoregressive weights into a diffusion model.
+
 ## 1.3.1
 
 Version 1.3.1 consolidates the 1.3 generation architecture without adding a

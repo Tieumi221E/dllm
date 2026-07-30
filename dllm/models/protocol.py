@@ -45,6 +45,7 @@ class ModelCapabilities:
     explicit_position_ids: bool = False
     inputs_embeds: bool = False
     cache_semantics: FrozenSet[str] = frozenset()
+    prediction_fields: FrozenSet[str] = frozenset()
 
 
 @runtime_checkable

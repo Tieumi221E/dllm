@@ -1,9 +1,9 @@
 # dllm
 
-A self-contained **masked diffusion language model (dLLM) toolkit** -
-training, inference, evaluation, and RL utilities in one importable package
-(`import dllm`), designed as the diffusion counterpart of a mature
-autoregressive training/inference stack.
+A compact **discrete diffusion language model (dLLM) algorithm and semantics
+layer** for training objectives, inference, evaluation, and post-training. It
+is designed to extend the mature PyTorch/Transformers ecosystem, not replace
+its training and serving stack.
 
 Every functional default follows an authoritative reference implementation
 (see [References](#references)); every documented alternative is an explicit
@@ -17,14 +17,16 @@ dllm/
   data.py           PretrainCollator / SFTCollator / BlockSFTCollator
   topology.py       ordered bidirectional / causal / block-causal dependencies
   execution.py      exactness metadata shared by cache implementations
+  adapters/         framework bridges with explicit prediction/topology contracts
   models/           denoiser/cache protocols, topology-aware reference model,
                     exact ordered-prefix KV cache, HF wrapper
   sampling/         full-canvas / incremental / self-speculative generation,
                     commit policies, reference backends, trajectory recording
   rl.py             trajectory state reconstruction + differentiable PPO primitives
-  presets.py        regime presets (small-mha / small-gqa / llada-8b)
+  presets.py        composable model / recipe / integration presets
+  validation.py     executable denoiser and cache-contract checks
 docs/architecture.md capability boundaries and admission policy
-tests/test_smoke.py focused semantic and numerical tests
+tests/              semantic, adapter, preset, and compatibility tests
 ```
 
 The long-term package boundary and support tiers are described in
@@ -42,7 +44,7 @@ compatibility, but wildcard imports stay intentionally compact.
 
 ```bash
 pip install -e .          # add [hf] for the transformers wrapper
-python tests/test_smoke.py
+pytest -q tests/
 ```
 
 ## Quickstart
@@ -131,6 +133,30 @@ print(model.capabilities, out.logits.shape, out.cache.semantics)
 `.from_boundaries` compile to the same low-level SDPA mask contract.
 `forward` still returns a logits tensor by default, and `return_kvs=True`
 still returns the 1.1 `(logits, kvs)` tuple.
+
+### External Transformers denoisers
+
+Already diffusion-capable Transformers models can enter the same structured
+boundary without changing their checkpoint code:
+
+```python
+from transformers import AutoModelForMaskedLM
+from dllm.adapters import TransformersDenoiserAdapter
+
+hf_model = AutoModelForMaskedLM.from_pretrained(checkpoint)
+model = TransformersDenoiserAdapter(
+    hf_model,
+    prediction_field="same_position",
+    default_topology="bidirectional",
+)
+```
+
+The adapter normalizes inputs, outputs, and declared capabilities. It does
+not turn an autoregressive checkpoint into a diffusion model: a
+`prediction_field="next_token"` model remains useful for causal verification
+or integration tests, but is rejected by full-canvas diffusion sampling.
+Model-specific attention switching and cache semantics stay in explicit
+adapter hooks.
 
 ### Sampling
 
@@ -223,6 +249,25 @@ traj.step_map                    # commit order -> (x_t, x_0) training pairs
 traj.summary(EOS)                # rollout progress/confidence/log-prob stats
 ```
 
+### Composable presets
+
+Presets keep model shape, algorithm recipe, and checkpoint integration as
+independent axes:
+
+```python
+from dllm import compose_presets
+
+cfg = compose_presets(
+    "model/ref-small-gqa-rope",
+    "recipe/full-threshold",
+    overrides={"canvas": {"gen_length": 128}},
+)
+```
+
+Composition rejects conflicting fields unless the caller supplies an explicit
+override. The legacy `small-mha`, `small-gqa`, and `llada-8b` presets retain
+their exact 1.3.1 values.
+
 ## Switch reference
 
 | Knob | Default (authoritative) | Alternatives |
@@ -270,15 +315,12 @@ traj.summary(EOS)                # rollout progress/confidence/log-prob stats
 
 ## Verification
 
-`python tests/test_smoke.py` - focused tests including numeric equality with the
-reference loss implementation (pretraining + SFT normalizations), ordered
-topology == explicit attention masks, multi-block KV-cache == full topology
-recomputation (learned & RoPE), padding invariance with explicit positions,
-cache-on/off generation equality, structural cache-adapter compatibility,
-cache provenance, trajectory serialization and differentiable policy scoring,
-custom commit-policy actions, self-speculation equality with greedy causal
-decoding, and exact recovery of log V by the MC likelihood estimator on a
-uniform-logits model.
+`pytest -q tests/` covers numeric equality with reference objectives, ordered
+topology, exact and approximate cache contracts, padding and position
+invariance, cache-on/off generation equality, trajectory and policy scoring,
+self-speculation, preset composition, adapter capability failures, an optional
+tiny Transformers integration, and exact recovery of log V by the Monte Carlo
+likelihood estimator on a uniform-logits model.
 
 ## References
 

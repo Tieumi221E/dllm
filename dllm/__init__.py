@@ -1,15 +1,16 @@
-"""dllm - a self-contained masked-diffusion LM toolkit.
+"""dllm - a compact discrete-diffusion LM algorithm kernel.
 
 Training :  schedules / forward_process / diffusion_loss / collators
 Inference:  full-canvas / incremental / self-speculative generation
 Evaluation: mc_conditional_nll
 RL:         trajectory_logprobs (canvas-consistent state reconstruction)
 Models:     topology-aware DiffusionTransformer, denoiser protocol, HF wrapper
+Adapters:   explicit framework capability and execution bridges
 
 References for the algorithms are listed in the README.
 """
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 from .schedules import NoiseSchedule, LinearSchedule, CosineSchedule, get_schedule
 from .masking import MaskingOutput, forward_process, make_labels, random_truncate
@@ -71,7 +72,13 @@ from .rl import (
     trajectory_logprobs,
     trajectory_states,
 )
-from .presets import get_preset, list_presets
+from .presets import (
+    PresetInfo,
+    compose_presets,
+    get_preset,
+    get_preset_info,
+    list_presets,
+)
 
 __all__ = [
     "__version__",
@@ -129,6 +136,9 @@ __all__ = [
     "trajectory_logprobs",
     "trajectory_states",
     # presets
+    "PresetInfo",
+    "compose_presets",
     "get_preset",
+    "get_preset_info",
     "list_presets",
 ]
