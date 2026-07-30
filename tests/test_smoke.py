@@ -507,6 +507,7 @@ def test_trajectory_logprobs_partition():
     assert len(states) == 2
     assert states[0].input_ids.numel() == 5 + 4
     assert states[1].input_ids.numel() == 5 + 8
+    assert states[0].to("cpu").input_ids.device.type == "cpu"
 
 
 def test_trajectory_logprobs_gradient_and_ppo():

@@ -43,6 +43,16 @@ class TrajectoryState:
     positions: torch.Tensor  # (n,) absolute target positions
     target_ids: torch.Tensor  # (n,)
 
+    def to(self, device: Union[str, torch.device]) -> "TrajectoryState":
+        """Copy the state tensors to ``device`` for storage or scoring."""
+        return TrajectoryState(
+            step=self.step,
+            block=self.block,
+            input_ids=self.input_ids.to(device),
+            positions=self.positions.to(device),
+            target_ids=self.target_ids.to(device),
+        )
+
 
 @dataclass
 class PPOObjective:
