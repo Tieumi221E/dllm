@@ -39,7 +39,13 @@ class CacheSemantics:
         )
 
 
+EXACT_ORDERED = CacheSemantics.exact_for("ordered")
+# Compatibility constant for callers that name the common fixed-block case.
 EXACT_BLOCK_CAUSAL = CacheSemantics.exact_for("block_causal")
 
 
-__all__ = ["CacheSemantics", "EXACT_BLOCK_CAUSAL"]
+__all__ = [
+    "CacheSemantics",
+    "EXACT_ORDERED",
+    "EXACT_BLOCK_CAUSAL",
+]

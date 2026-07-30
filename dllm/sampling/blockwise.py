@@ -21,7 +21,7 @@ from typing import List, Optional, Sequence
 
 import torch
 
-from ..models.transformer import DiffusionTransformer
+from ..models.protocol import BlockCacheDenoiser
 from ..topology import AttentionTopology
 from .policies import (
     CommitPolicy,
@@ -86,7 +86,7 @@ class BlockwiseOutput:
 
 @torch.no_grad()
 def generate_blockwise(
-    model: DiffusionTransformer,
+    model,
     prompt_ids: torch.Tensor,
     mask_token_id: int,
     config: Optional[BlockwiseConfig] = None,
@@ -106,6 +106,8 @@ def generate_blockwise(
     policy: CommitPolicy = resolve_commit_policy(
         cfg.commit, threshold=cfg.threshold
     )
+    if cfg.use_cache and not isinstance(model, BlockCacheDenoiser):
+        raise TypeError("use_cache=True requires a BlockCacheDenoiser")
     if prompt_ids.dim() == 1:
         prompt_ids = prompt_ids.unsqueeze(0)
     if num_samples is not None and prompt_ids.shape[0] == 1:

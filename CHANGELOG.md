@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.3.1
+
+Version 1.3.1 consolidates the 1.3 generation architecture without adding a
+new decoding method.
+
+### Added
+
+- `BlockCacheDenoiser` and `PrefixCacheDenoiser` structural protocols for
+  cache-capable sampler integrations.
+- `DiffusionTransformer.build_approximate_prefix_cache(...)`, which owns the
+  windowed full-canvas approximation and its provenance.
+- `EXACT_ORDERED`, the precise cache semantic for causal, fixed-block, and
+  arbitrary ordered-prefix extension.
+
+### Changed
+
+- Canvas and blockwise cache paths now depend on structural protocols instead
+  of checking for the reference Transformer class.
+- The reference `TopologySelfSpecBackend` moved to
+  `dllm.sampling.backends`; the framework-neutral state machine no longer
+  imports model code.
+- Quota and threshold policies now reuse the public selector primitives with
+  an explicit candidate mask; suppressed `-inf` scores no longer duplicate
+  selection logic or cause ambiguous membership.
+- Exact caches reject extensions whose valid groups do not strictly follow
+  the cached groups, preventing an invalid speed path from being mislabeled
+  as exact.
+- The root wildcard API now favors common workflows. Advanced extension
+  records and resolver helpers remain available from `dllm.sampling`, and
+  their existing direct root attributes remain import-compatible.
+
+### Compatibility
+
+- Existing high-level imports and the legacy two-argument selector calls are
+  unchanged.
+- `EXACT_BLOCK_CAUSAL` remains available for callers naming that specific
+  regime.
+- Model state dictionaries and training, generation, and RL tensor outputs
+  are unchanged; cache metadata now names the broader ordered invariant.
+
 ## 1.3.0
 
 Version 1.3 separates generation decisions from sampler control flow and adds

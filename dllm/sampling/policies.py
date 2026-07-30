@@ -12,29 +12,11 @@ from typing import Optional, Protocol, Union, runtime_checkable
 
 import torch
 
-from .utils import get_num_transfer_tokens
-
-
-def _select_topk_candidates(
-    confidence: torch.Tensor,
-    candidates: torch.Tensor,
-    quota: torch.Tensor,
-) -> torch.Tensor:
-    """Select top candidates without using score finiteness as membership."""
-
-    batch, length = confidence.shape
-    commit = torch.zeros(
-        batch, length, dtype=torch.bool, device=confidence.device
-    )
-    for row in range(batch):
-        positions = torch.nonzero(candidates[row], as_tuple=True)[0]
-        count = min(int(quota[row].item()), int(positions.numel()))
-        if count:
-            relative = torch.topk(
-                confidence[row, positions], k=count
-            ).indices
-            commit[row, positions[relative]] = True
-    return commit
+from .utils import (
+    get_num_transfer_tokens,
+    select_threshold_commits,
+    select_topk_commits,
+)
 
 
 @dataclass(frozen=True)
@@ -98,8 +80,10 @@ class QuotaCommitPolicy:
         quota = get_num_transfer_tokens(state.initial_mask, state.steps)
         current = quota[:, min(state.step, state.steps - 1)]
         return CommitDecision(
-            _select_topk_candidates(
-                state.confidence, state.candidates, current
+            select_topk_commits(
+                state.confidence,
+                current,
+                candidates=state.candidates,
             )
         )
 
@@ -111,19 +95,13 @@ class ThresholdCommitPolicy:
     threshold: float = 0.9
 
     def select(self, state: CommitState) -> CommitDecision:
-        commit = state.candidates & (
-            state.confidence >= self.threshold
+        return CommitDecision(
+            select_threshold_commits(
+                state.confidence,
+                self.threshold,
+                candidates=state.candidates,
+            )
         )
-        fallback = state.candidates.any(dim=-1) & ~commit.any(dim=-1)
-        if bool(fallback.any()):
-            rows = torch.nonzero(fallback, as_tuple=True)[0]
-            for row in rows.tolist():
-                positions = torch.nonzero(
-                    state.candidates[row], as_tuple=True
-                )[0]
-                relative = state.confidence[row, positions].argmax()
-                commit[row, positions[relative]] = True
-        return CommitDecision(commit)
 
 
 CommitSpec = Union[str, CommitPolicy]

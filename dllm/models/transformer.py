@@ -24,7 +24,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
-from ..execution import CacheSemantics, EXACT_BLOCK_CAUSAL
+from ..execution import (
+    CacheSemantics,
+    EXACT_ORDERED,
+)
 from ..topology import AttentionTopology, ordered_attention_mask
 from .protocol import (
     DenoiserInput,
@@ -104,7 +107,7 @@ class KVCache:
     key_mask: Optional[torch.Tensor] = None  # (B, L_prefix) bool, True = attend
     position_ids: Optional[torch.Tensor] = None  # (B, L_prefix)
     group_ids: Optional[torch.Tensor] = None  # (B, L_prefix), ordered topology
-    semantics: CacheSemantics = EXACT_BLOCK_CAUSAL
+    semantics: CacheSemantics = EXACT_ORDERED
 
     @property
     def length(self) -> int:
@@ -214,6 +217,16 @@ class KVCache:
                 else self.group_ids[:, :length]
             ),
             semantics=self.semantics,
+        )
+
+    def with_semantics(self, semantics: CacheSemantics) -> "KVCache":
+        """Return this cache with new execution provenance."""
+        return KVCache(
+            kvs=self.kvs,
+            key_mask=self.key_mask,
+            position_ids=self.position_ids,
+            group_ids=self.group_ids,
+            semantics=semantics,
         )
 
 
@@ -386,7 +399,9 @@ class DiffusionTransformer(nn.Module):
         ),
         explicit_position_ids=True,
         inputs_embeds=True,
-        cache_semantics=frozenset({"exact_block_causal"}),
+        cache_semantics=frozenset(
+            {"exact_ordered", "exact_block_causal"}
+        ),
     )
 
     def __init__(
@@ -627,7 +642,7 @@ class DiffusionTransformer(nn.Module):
                     key_mask=None if valid.all() else valid,
                     position_ids=position_ids,
                     group_ids=groups,
-                    semantics=EXACT_BLOCK_CAUSAL,
+                    semantics=EXACT_ORDERED,
                 )
             return DenoiserOutput(logits=logits, cache=cache)
         return (logits, kvs) if return_kvs else logits
@@ -694,8 +709,38 @@ class DiffusionTransformer(nn.Module):
             key_mask=None if valid.all() else valid,
             position_ids=position_ids,
             group_ids=groups,
-            semantics=EXACT_BLOCK_CAUSAL,
+            semantics=EXACT_ORDERED,
         )
+
+    def build_approximate_prefix_cache(
+        self,
+        input_ids: torch.Tensor,
+        prefix_length: int,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> DenoiserOutput:
+        """Freeze a prefix encoded inside a bidirectional full canvas.
+
+        This is the explicit approximation used by windowed full-canvas
+        decoding: the returned prefix states are not recomputed as the active
+        block changes.
+        """
+        if prefix_length < 0 or prefix_length > input_ids.shape[1]:
+            raise ValueError("prefix_length must be within input_ids")
+        output = self.forward(
+            input_ids,
+            attention_mask=attention_mask,
+            return_kvs=True,
+            return_dict=True,
+        )
+        if output.cache is None:
+            raise RuntimeError("full-canvas forward did not return a cache")
+        cache = output.cache.crop(prefix_length).with_semantics(
+            CacheSemantics.approximate_for(
+                "bidirectional_canvas",
+                "prefix states are frozen while the active window changes",
+            )
+        )
+        return DenoiserOutput(logits=output.logits, cache=cache)
 
     def forward_block(
         self,
@@ -707,7 +752,7 @@ class DiffusionTransformer(nn.Module):
         group_ids: Optional[torch.Tensor] = None,
         return_dict: bool = False,
     ):
-        """Forward one block against a prefix cache (block-causal semantics).
+        """Forward one block against an ordered-prefix cache.
 
         The block attends to [prefix + block]; the prefix representation is
         frozen (never sees the block). Returns block logits and the block's
@@ -755,6 +800,19 @@ class DiffusionTransformer(nn.Module):
                 batch, cache.length, dtype=torch.long, device=block_ids.device
             )
         )
+        if cache.semantics.exact and cache.length:
+            comparable = prefix_valid.any(dim=1) & block_valid.any(dim=1)
+            prefix_max = prefix_groups.masked_fill(
+                ~prefix_valid, torch.iinfo(prefix_groups.dtype).min
+            ).max(dim=1).values
+            block_min = group_ids.masked_fill(
+                ~block_valid, torch.iinfo(group_ids.dtype).max
+            ).min(dim=1).values
+            if bool((comparable & (block_min <= prefix_max)).any()):
+                raise ValueError(
+                    "exact ordered cache extension requires valid block "
+                    "groups to follow all valid cached groups"
+                )
         key_groups = torch.cat([prefix_groups, group_ids], dim=1)
         key_valid = torch.cat([prefix_valid, block_valid], dim=1)
         bias = ordered_attention_mask(

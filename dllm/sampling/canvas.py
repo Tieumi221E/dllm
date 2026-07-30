@@ -14,21 +14,18 @@ Prefix cache (``prefix_cache=True``): at each block start one full-canvas
 forward builds the cache, chopped at the block start; inner steps recompute
 only a window (block .. block+further_horizon). Higher fidelity than
 incremental caching because the cached prefix has seen the masked future.
-Requires ``forward(..., return_kvs=True)`` + ``forward_block``
-(DiffusionTransformer). Not combinable with CFG.
+Requires a ``PrefixCacheDenoiser``. Not combinable with CFG.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
 
-from ..execution import CacheSemantics
-from ..models.protocol import extract_logits
-from ..models.transformer import DiffusionTransformer, KVCache
+from ..models.protocol import PrefixCacheDenoiser, extract_logits
 from .policies import (
     CommitPolicy,
     CommitSpec,
@@ -107,7 +104,8 @@ def generate_canvas(
 
     Args:
         model: mask predictor - callable returning logits (or ``.logits``).
-            With ``prefix_cache=True`` it must be a DiffusionTransformer.
+            With ``prefix_cache=True`` it must implement
+            ``PrefixCacheDenoiser``.
         prompt_ids: (B, Lp) or (Lp,) long tensor.
         attention_mask: (B, Lp) for left-padded prompt batches; extended with
             ones over the generation region.
@@ -122,8 +120,8 @@ def generate_canvas(
     )
     if cfg.prefix_cache and cfg.cfg_scale > 0:
         raise ValueError("prefix_cache is not combinable with CFG")
-    if cfg.prefix_cache and not isinstance(model, DiffusionTransformer):
-        raise TypeError("prefix_cache requires a dllm DiffusionTransformer")
+    if cfg.prefix_cache and not isinstance(model, PrefixCacheDenoiser):
+        raise TypeError("prefix_cache requires a PrefixCacheDenoiser")
     if cfg.trace_topk < 0:
         raise ValueError("trace_topk must be non-negative")
     if cfg.trace_topk and not cfg.record_trace:
@@ -194,7 +192,7 @@ def generate_canvas(
         block_mask0 = x[:, s:e] == mask_token_id
 
         # -- prefix cache: one full forward per block, then window updates --
-        cache: Optional[KVCache] = None
+        cache: Optional[Any] = None
         window_end = (
             Lp + G
             if cfg.further_horizon is None
@@ -211,30 +209,25 @@ def generate_canvas(
 
             if cfg.prefix_cache:
                 if cache is None:
-                    logits_full, kvs = model(
-                        x, attention_mask=full_attn, return_kvs=True
+                    output = model.build_approximate_prefix_cache(
+                        x,
+                        prefix_length=s,
+                        attention_mask=full_attn,
                     )
                     nfe += 1
-                    cache = KVCache(
-                        kvs=[(k[:, :, :s], v[:, :, :s]) for k, v in kvs],
-                        key_mask=None if full_attn is None else full_attn[:, :s].bool(),
-                        position_ids=torch.arange(s, device=x.device)
-                        .unsqueeze(0)
-                        .expand(x.shape[0], -1),
-                        group_ids=torch.zeros(
-                            x.shape[0], s, dtype=torch.long, device=x.device
-                        ),
-                        semantics=CacheSemantics.approximate_for(
-                            "bidirectional_canvas",
-                            "prefix states are frozen while the active window changes",
-                        ),
-                    )
-                    logits = logits_full
+                    if output.cache is None:
+                        raise RuntimeError(
+                            "prefix-cache backend did not return a cache"
+                        )
+                    cache = output.cache
+                    logits = extract_logits(output)
                     lo = 0  # logits indexed over full canvas
                 else:
-                    win_logits, _ = model.forward_block(x[:, s:window_end], cache)
+                    block_output = model.forward_block(
+                        x[:, s:window_end], cache
+                    )
                     nfe += 1
-                    logits = win_logits
+                    logits = extract_logits(block_output)
                     lo = s  # logits indexed from s
             else:
                 logits = forward_logits(x, full_attn)

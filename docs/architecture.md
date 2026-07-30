@@ -15,10 +15,10 @@ without making them mandatory dependencies.
 |---|---|---|
 | Process | Time schedules, mask corruption, maskable regions | Structured and non-absorbing corruption |
 | Objective | Token losses, MDLM importance weighting, explicit reductions | Block-diffusion and learned-schedule estimators |
-| Model | Denoiser protocol, prediction field, explicit positions, reference transformer | Checkpoint and framework adapters |
+| Model | Denoiser and cache protocols, prediction field, explicit positions, reference transformer | Checkpoint and framework adapters |
 | Topology | Ordered attention groups independent of tensor layout | Sparse, edit-aware, and multimodal dependency compilers |
 | Sampling | Full-canvas, incremental, and linear self-speculative generation; explicit proposal and commit policies | Learned position policies and batched speculation |
-| Execution | Exact block-causal cache and documented approximate prefix cache | Hierarchical and adaptive cache adapters |
+| Execution | Exact ordered-prefix cache and documented approximate prefix cache | Hierarchical and adaptive cache adapters |
 | Trajectory | Token actions, commit order, optional predictive distributions | Position-action probabilities and distillation targets |
 | Post-training | State reconstruction and differentiable PPO primitives | GRPO/DPO adapters without task-specific rewards |
 | Evaluation | Monte Carlo conditional NLL | Common generation and likelihood harness adapters |
@@ -80,6 +80,11 @@ that boundary while preserving its tensor-returning 1.1 `forward` API.
 Adapters may expose framework-native outputs as long as `extract_logits`
 normalizes the prediction field.
 
+Fast samplers depend on structural protocols rather than the reference model
+class. `BlockCacheDenoiser` defines exact ordered-prefix cache construction
+and block extension; `PrefixCacheDenoiser` additionally defines explicit
+approximate prefix construction for a changing bidirectional canvas.
+
 ### Topology contract
 
 `AttentionTopology` is an ordered partition. A query in group `g` attends to
@@ -130,11 +135,13 @@ A cache implementation must declare whether it is:
 - **approximate**, with the changed dependency made explicit;
 - a pure execution optimization whose cache-on and cache-off results agree.
 
-`build_kv_cache` plus `forward_block` is exact for block-causal attention.
-Full-canvas prefix caching is an approximation because cached prefix states
-are not recomputed after the active block changes. `KVCache.semantics`
-declares this provenance, while cached key validity, positions, and ordered
-group IDs travel with the tensors.
+`build_kv_cache` plus `forward_block` is exact for ordered dependencies in
+which cached groups precede the active group. Block-causal decoding is the
+standard use of that invariant. Full-canvas prefix caching is an
+approximation because cached prefix states are not recomputed after the
+active block changes. `build_approximate_prefix_cache` makes that model-owned
+choice explicit. `KVCache.semantics` declares the provenance, while cached key
+validity, positions, and ordered group IDs travel with the tensors.
 
 ### Self-speculation contract
 
@@ -143,6 +150,10 @@ causal seed, diffusion draft, causal verification, longest matching prefix,
 one verifier token, and rejected-cache cropping. A `SelfSpecBackend` owns
 attention-mode switching, prediction-field alignment, optional adapter
 routing, and framework cache operations.
+
+The reference topology backend lives with other sampling backends, separate
+from the framework-neutral orchestration state machine. Third-party backends
+therefore need not inherit from or import the reference transformer.
 
 The accepted output is the backend's greedy causal sequence under identical
 token suppression and stopping. Draft randomness may change acceptance and

@@ -9,22 +9,31 @@ Models:     topology-aware DiffusionTransformer, denoiser protocol, HF wrapper
 References for the algorithms are listed in the README.
 """
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 from .schedules import NoiseSchedule, LinearSchedule, CosineSchedule, get_schedule
 from .masking import MaskingOutput, forward_process, make_labels, random_truncate
 from .loss import diffusion_loss, masked_cross_entropy, mc_conditional_nll
 from .data import PretrainCollator, SFTCollator, BlockSFTCollator
-from .topology import AttentionTopology, ordered_attention_mask
-from .execution import CacheSemantics, EXACT_BLOCK_CAUSAL
+from .topology import (
+    AttentionTopology,
+    ordered_attention_mask as ordered_attention_mask,
+)
+from .execution import (
+    CacheSemantics,
+    EXACT_BLOCK_CAUSAL as EXACT_BLOCK_CAUSAL,
+    EXACT_ORDERED as EXACT_ORDERED,
+)
 from .models import (
+    BlockCacheDenoiser as BlockCacheDenoiser,
     Denoiser,
     DenoiserInput,
     DenoiserOutput,
     DiffusionTransformer,
     KVCache,
-    ModelCapabilities,
-    extract_logits,
+    ModelCapabilities as ModelCapabilities,
+    PrefixCacheDenoiser as PrefixCacheDenoiser,
+    extract_logits as extract_logits,
 )
 from .sampling import (
     CanvasConfig,
@@ -33,19 +42,19 @@ from .sampling import (
     BlockwiseConfig,
     BlockwiseOutput,
     generate_blockwise,
-    CommitDecision,
+    CommitDecision as CommitDecision,
     CommitPolicy,
-    CommitSpec,
-    CommitState,
+    CommitSpec as CommitSpec,
+    CommitState as CommitState,
     QuotaCommitPolicy,
     ThresholdCommitPolicy,
-    apply_commit_policy,
-    resolve_commit_policy,
+    apply_commit_policy as apply_commit_policy,
+    resolve_commit_policy as resolve_commit_policy,
     SelfSpecBackend,
     SelfSpecConfig,
     SelfSpecOutput,
     SelfSpecStats,
-    SelfSpecStep,
+    SelfSpecStep as SelfSpecStep,
     TopologySelfSpecBackend,
     generate_self_speculative,
     TrajectorySample,
@@ -85,16 +94,12 @@ __all__ = [
     "BlockSFTCollator",
     # models
     "AttentionTopology",
-    "ordered_attention_mask",
     "CacheSemantics",
-    "EXACT_BLOCK_CAUSAL",
     "Denoiser",
     "DenoiserInput",
     "DenoiserOutput",
     "DiffusionTransformer",
     "KVCache",
-    "ModelCapabilities",
-    "extract_logits",
     # sampling
     "CanvasConfig",
     "CanvasOutput",
@@ -102,19 +107,13 @@ __all__ = [
     "BlockwiseConfig",
     "BlockwiseOutput",
     "generate_blockwise",
-    "CommitDecision",
     "CommitPolicy",
-    "CommitSpec",
-    "CommitState",
     "QuotaCommitPolicy",
     "ThresholdCommitPolicy",
-    "apply_commit_policy",
-    "resolve_commit_policy",
     "SelfSpecBackend",
     "SelfSpecConfig",
     "SelfSpecOutput",
     "SelfSpecStats",
-    "SelfSpecStep",
     "TopologySelfSpecBackend",
     "generate_self_speculative",
     "TrajectorySample",
