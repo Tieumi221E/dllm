@@ -13,8 +13,14 @@ References for the algorithms are listed in the README.
 __version__ = "1.3.2"
 
 from .schedules import NoiseSchedule, LinearSchedule, CosineSchedule, get_schedule
-from .masking import MaskingOutput, forward_process, make_labels, random_truncate
-from .loss import diffusion_loss, masked_cross_entropy, mc_conditional_nll
+from .masking import (
+    MaskingOutput,
+    complementary_view,
+    forward_process,
+    make_labels,
+    random_truncate,
+)
+from .loss import diffusion_loss, masked_cross_entropy, mc_conditional_nll, next_token_loss
 from .data import PretrainCollator, SFTCollator, BlockSFTCollator
 from .topology import (
     AttentionTopology,
@@ -89,12 +95,14 @@ __all__ = [
     "get_schedule",
     "MaskingOutput",
     "forward_process",
+    "complementary_view",
     "make_labels",
     "random_truncate",
     # loss & eval
     "diffusion_loss",
     "masked_cross_entropy",
     "mc_conditional_nll",
+    "next_token_loss",
     # data
     "PretrainCollator",
     "SFTCollator",

@@ -12,6 +12,11 @@ SFT pads short pairs with EOS as part of the response (maskable, attended,
 counted in ``answer_lengths``) so the model learns length control. Block SFT
 uses ``norm="answer"`` for bound-consistent weighting, or
 ``importance_weight=False, norm="masked"`` for uniform weighting.
+
+``SFTCollator`` also returns ``content`` (the real response plus its one
+terminal EOS, without padding) for ``norm="content"``, and can pad every
+response to a fixed ``response_canvas`` so training matches a fixed
+generation length at inference.
 """
 
 from __future__ import annotations
@@ -102,7 +107,19 @@ class SFTCollator:
         non_maskable_ids: Optional[Set[int]] = None,  # EOS-collapse mitigation
         min_one_mask: bool = False,
         generator: Optional[torch.Generator] = None,
+        response_canvas: Optional[int] = None,
     ):
+        """
+        Args:
+            response_canvas: if set, every response (after the EOS is
+                appended) is padded with EOS to exactly this many tokens, the
+                fixed generation length used at inference. Positions after a
+                sample's canvas that exist only because another sample in the
+                batch is longer are batch padding: not attended, not
+                maskable. A response longer than the canvas raises.
+        """
+        if response_canvas is not None and response_canvas < 1:
+            raise ValueError("response_canvas must be a positive length")
         self.mask_token_id = mask_token_id
         self.eos_token_id = eos_token_id
         self.max_length = max_length
@@ -111,13 +128,22 @@ class SFTCollator:
         self.non_maskable_ids = non_maskable_ids or set()
         self.min_one_mask = min_one_mask
         self.generator = generator
+        self.response_canvas = response_canvas
 
     def __call__(self, batch: List[Dict[str, List[int]]]) -> Dict[str, torch.Tensor]:
-        seqs, prompt_lens = [], []
+        seqs, prompt_lens, content_lens = [], [], []
         for ex in batch:
             p, r = list(ex["prompt_ids"]), list(ex["response_ids"])
             if self.append_eos and (not r or r[-1] != self.eos_token_id):
                 r = r + [self.eos_token_id]
+            content_lens.append(len(r))
+            if self.response_canvas is not None:
+                if len(r) > self.response_canvas:
+                    raise ValueError(
+                        f"response of {len(r)} tokens exceeds response_canvas="
+                        f"{self.response_canvas}"
+                    )
+                r = r + [self.eos_token_id] * (self.response_canvas - len(r))
             seqs.append(p + r)
             prompt_lens.append(len(p))
 
@@ -129,11 +155,22 @@ class SFTCollator:
         for i, s in enumerate(seqs):
             s = s[:width]
             ids[i, : len(s)] = torch.tensor(s, dtype=torch.long)
-        attn = torch.ones_like(ids)
         prompt_lens_t = torch.tensor(prompt_lens, dtype=torch.long)
+        content_lens_t = torch.tensor(content_lens, dtype=torch.long)
 
         positions = torch.arange(width).unsqueeze(0)
         maskable = positions >= prompt_lens_t.unsqueeze(1)  # response + EOS pads
+        if self.response_canvas is not None:
+            # a fixed canvas ends every sample at prompt + canvas; anything
+            # beyond it is batch padding
+            in_canvas = positions < (prompt_lens_t + self.response_canvas).unsqueeze(1)
+            maskable &= in_canvas
+            attn = in_canvas.to(torch.long).expand(len(seqs), width).clone()
+        else:
+            attn = torch.ones_like(ids)
+        content = maskable & (
+            positions < (prompt_lens_t + content_lens_t).unsqueeze(1)
+        )
         if self.non_maskable_ids:
             for tok in self.non_maskable_ids:
                 maskable &= ids != tok
@@ -157,6 +194,8 @@ class SFTCollator:
             "t": m.t,
             "prompt_lengths": prompt_lens_t,
             "answer_lengths": answer_lengths,
+            "content": content,
+            "content_lengths": content.sum(dim=1),
         }
 
 

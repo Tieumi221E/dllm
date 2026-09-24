@@ -84,6 +84,50 @@ def forward_process(
     )
 
 
+def complementary_view(
+    clean_ids: torch.Tensor,
+    masking: MaskingOutput,
+    mask_token_id: int,
+    maskable: Optional[torch.Tensor] = None,
+    min_prob: float = 1e-3,
+) -> MaskingOutput:
+    """The complementary masked view of a ``forward_process`` output.
+
+    Every maskable position is masked in exactly one of the two views, so the
+    pair supervises each response token once (complementary masking, as in
+    DiffuCoder's coupled sampling, Fast-dLLM v2 and LLaDA2.0 SFT).
+
+    The complement masks a position with marginal probability ``1 - p``, so
+    its ``p_mask`` is ``1 - p`` and each view is, on its own, an unbiased
+    importance-weighted estimate. ``1 - p`` is clamped at ``min_prob``: as
+    ``p -> 1`` the complement's weight ``1 / (1 - p)`` diverges; the clamp
+    trades a small bias for bounded variance, and pairs best with a clipped
+    noise schedule (masking rates away from 0 and 1).
+
+    Args:
+        clean_ids: (B, L) clean token ids.
+        masking: output of ``forward_process`` on ``clean_ids``.
+        maskable: (B, L) bool - the same eligibility mask passed to
+            ``forward_process``; ``None`` means every position.
+        min_prob: lower bound for the complement's mask probability.
+    """
+    if clean_ids.shape != masking.masked_indices.shape:
+        raise ValueError("clean_ids must match the masking output's shape")
+    if not 0.0 < min_prob <= 1.0:
+        raise ValueError("min_prob must be in (0, 1]")
+    device = clean_ids.device
+    if maskable is None:
+        maskable_b = torch.ones_like(clean_ids, dtype=torch.bool)
+    else:
+        maskable_b = maskable.to(device=device, dtype=torch.bool)
+    masked = maskable_b & ~masking.masked_indices.to(device=device, dtype=torch.bool)
+    p_mask = (1.0 - masking.p_mask.to(device)).clamp(min=min_prob)
+    noisy_ids = torch.where(masked, mask_token_id, clean_ids)
+    return MaskingOutput(
+        noisy_ids=noisy_ids, masked_indices=masked, p_mask=p_mask, t=1.0 - masking.t
+    )
+
+
 def make_labels(
     input_ids: torch.Tensor,
     masked_indices: torch.Tensor,

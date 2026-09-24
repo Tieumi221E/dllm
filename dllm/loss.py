@@ -2,8 +2,10 @@
 
 ``diffusion_loss``: masked cross-entropy with 1/p importance weighting and
 explicit normalization choices (``norm="tokens"`` for pretraining,
-``"answer"`` for SFT). ``mc_conditional_nll``: low-variance Monte-Carlo
-estimator of the conditional NLL bound.
+``"answer"`` for SFT, ``"content"`` for SFT whose padding should not dilute
+the response). ``next_token_loss``: shifted cross-entropy for an
+autoregressive auxiliary term. ``mc_conditional_nll``: low-variance
+Monte-Carlo estimator of the conditional NLL bound.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ from typing import Callable, Optional
 import torch
 import torch.nn.functional as F
 
-_NORMS = ("tokens", "maskable", "answer", "masked", "sum")
+_NORMS = ("tokens", "maskable", "answer", "content", "masked", "sum")
 _REDUCTIONS = ("none", "sum", "token_mean", "sample_mean")
 
 
@@ -123,6 +125,7 @@ def diffusion_loss(
     norm: str = "tokens",
     maskable: Optional[torch.Tensor] = None,
     importance_weight: bool = True,
+    content: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Masked cross-entropy with 1/p importance weighting.
 
@@ -136,6 +139,10 @@ def diffusion_loss(
             "tokens":   / (B*L)                          (pretraining)
             "maskable": / sum(maskable)
             "answer":   per-sample / row maskable count, then / B   (SFT)
+            "content":  per-sample / row content count, then / B
+                        (SFT; the numerator still covers every masked
+                        position, EOS padding included, but the padding no
+                        longer enters the denominator)
             "masked":   / sum(masked)   (mean CE over masked tokens; only valid
                         with importance_weight=False - uniform weighting)
             "sum":      none.
@@ -143,6 +150,17 @@ def diffusion_loss(
             (e.g. the response window in SFT, incl. EOS padding).
         importance_weight: divide each token CE by its p (the bound's
             weight). False -> uniform weighting.
+        content: (B, L) bool - required for the "content" norm: the real
+            response tokens plus the one terminal EOS, without padding
+            (``SFTCollator`` returns it as ``batch["content"]``). Must be a
+            subset of ``maskable`` when both are given.
+
+    Why "content": with "answer", a response of n tokens padded to a canvas
+    of L positions has each of its tokens weighted 1/L instead of 1/n, so a
+    fixed canvas scales the effective learning signal of the response by
+    n/L. When comparing against an autoregressive model trained with a
+    per-token mean over the response, "content" gives every response token
+    the same expected weight, 1/n.
     """
     if norm not in _NORMS:
         raise ValueError(f"norm must be one of {_NORMS}")
@@ -150,6 +168,15 @@ def diffusion_loss(
         raise ValueError("p_mask is required when importance_weight=True")
     if norm in ("maskable", "answer") and maskable is None:
         raise ValueError(f"maskable is required for norm='{norm}'")
+    if norm == "content":
+        if content is None:
+            raise ValueError("content is required for norm='content'")
+        if content.shape != target_ids.shape:
+            raise ValueError("content must have shape (B, L)")
+        if maskable is not None and bool(
+            (content.to(torch.bool) & ~maskable.to(torch.bool)).any()
+        ):
+            raise ValueError("content must be a subset of maskable")
     if norm == "masked" and importance_weight:
         raise ValueError(
             "norm='masked' with importance_weight=True is biased (the 1/p "
@@ -194,9 +221,48 @@ def diffusion_loss(
             .clamp(min=1.0)
         )
         return (token_ce.sum(dim=1) / lens).sum() / float(B)
+    if norm == "content":
+        lens = (
+            content.to(device=logits.device, dtype=torch.float32)
+            .sum(dim=1)
+            .clamp(min=1.0)
+        )
+        return (token_ce.sum(dim=1) / lens).sum() / float(B)
     if norm == "masked":
         return token_ce.sum() / masked_indices.sum().clamp(min=1).to(token_ce.dtype)
     return token_ce.sum()
+
+
+def next_token_loss(
+    logits: torch.Tensor,
+    target_ids: torch.Tensor,
+    selected: torch.Tensor,
+    reduction: str = "token_mean",
+) -> torch.Tensor:
+    """Shifted (autoregressive) cross-entropy: ``logits[:, i]`` predicts
+    ``target_ids[:, i + 1]``.
+
+    ``selected`` (B, L) marks the target positions to supervise (for an
+    auxiliary term on SFT data: the response content). Position 0 has no
+    predecessor and is never supervised.
+
+    This is an estimator primitive for an autoregressive auxiliary term next
+    to a diffusion objective (e.g. ``diffusion_loss(...) + lam *
+    next_token_loss(...)``). The caller is responsible for producing
+    ``logits`` under causal attention on the clean sequence; under
+    bidirectional attention the target token is visible and the term is
+    degenerate.
+    """
+    if logits.ndim != 3 or target_ids.shape != logits.shape[:2]:
+        raise ValueError("logits must be (B, L, V) and target_ids (B, L)")
+    if selected.shape != target_ids.shape:
+        raise ValueError("selected must have shape (B, L)")
+    return masked_cross_entropy(
+        logits[:, :-1],
+        target_ids[:, 1:],
+        selected[:, 1:].to(torch.bool),
+        reduction=reduction,
+    )
 
 
 @torch.no_grad()
