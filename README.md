@@ -73,6 +73,21 @@ loss = diffusion_loss(logits, batch["clean_ids"], batch["masked_indices"],
                       batch["p_mask"], norm="answer", maskable=batch["maskable"])
 ```
 
+With a fixed generation length at inference, pad every response to that
+length and keep the padding out of the denominator:
+
+```python
+collator = SFTCollator(mask_token_id=MASK, eos_token_id=EOS, response_canvas=64)
+batch = collator(samples)
+loss = diffusion_loss(logits, batch["clean_ids"], batch["masked_indices"],
+                      batch["p_mask"], norm="content",
+                      maskable=batch["maskable"], content=batch["content"])
+```
+
+Under `norm="answer"` a response of n tokens on a canvas of L positions is
+weighted n/L of what it would get from a per-token mean; `norm="content"`
+removes that dilution (see the switch reference and design notes).
+
 ### Semi-AR block SFT
 
 ```python
@@ -272,7 +287,10 @@ their exact 1.3.1 values.
 
 | Knob | Default (authoritative) | Alternatives |
 |---|---|---|
-| loss norm | `"tokens"` (pretrain), `"answer"` (SFT) | `"maskable"`; `"masked"` (uniform weighting only - the biased 1/p combination is rejected) |
+| loss norm | `"tokens"` (pretrain), `"answer"` (SFT) | `"content"` (SFT, per-sample response length without padding); `"maskable"`; `"masked"` (uniform weighting only - the biased 1/p combination is rejected) |
+| SFT canvas | pad to the batch's longest pair | `response_canvas=L` (fixed generation length; batch padding neither attended nor maskable) |
+| complementary masking | off | `complementary_view(clean_ids, masking, MASK, maskable)` (each position masked in exactly one of two views) |
+| autoregressive auxiliary term | none | `next_token_loss(logits, target_ids, selected)` (caller supplies causal-attention logits) |
 | loss weight | `1/p` (bound-consistent) | `importance_weight=False` (uniform block SFT) |
 | schedule | `LinearSchedule(eps=1e-3)` | `CosineSchedule` (weight derived consistently) |
 | t sampling | uniform, always | - (non-uniform t without re-weighting is not a likelihood bound; use a schedule instead) |
@@ -293,6 +311,12 @@ their exact 1.3.1 values.
   *fixed* denominator (total tokens, or per-sample answer length), never by
   the realized mask count - and never both per-sample-count-divided *and*
   1/p-weighted (that up-weights low-noise samples by ~1/t).
+- **Padding dilution**: `"answer"` counts EOS padding in the per-sample
+  denominator. With a fixed canvas much longer than the responses, the
+  response's share of the signal is n/L. `"content"` keeps a fixed
+  per-sample denominator (the response length), so it stays bound-consistent
+  while removing the dilution; this matters whenever a diffusion model is
+  compared against an autoregressive one trained with a per-token mean.
 - **Canvas consistency**: a bidirectional model's logits depend on whether
   future [MASK] tokens are present. Training collator, sampler, and RL
   log-prob reconstruction must share one canvas regime; the API names it

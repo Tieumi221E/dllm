@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `diffusion_loss(norm="content", content=...)`: per-sample normalization by
+  the real response length (response plus terminal EOS), so EOS padding no
+  longer dilutes the response. Existing norms are unchanged.
+- `SFTCollator(response_canvas=...)`: pad every response to a fixed length
+  matching inference; batch padding beyond a sample's canvas is neither
+  attended nor maskable. SFT batches also return `content` and
+  `content_lengths`.
+- `complementary_view`: the complementary masked view of a `forward_process`
+  output, with the complement's own mask probability (clamped at
+  `min_prob`).
+- `next_token_loss`: shifted cross-entropy for an autoregressive auxiliary
+  term next to a diffusion objective.
+
+### Compatibility
+
+- All defaults are unchanged; the new SFT batch keys are additive.
+
 ## 1.3.2
 
 Version 1.3.2 establishes `dllm` as a diffusion-specific extension layer over
