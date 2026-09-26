@@ -25,6 +25,7 @@ from .masking import (
     forward_process,
     make_labels,
     random_truncate,
+    sample_times,
     uniform_forward_process,
 )
 from .loss import (
@@ -112,6 +113,7 @@ __all__ = [
     "MaskingOutput",
     "forward_process",
     "uniform_forward_process",
+    "sample_times",
     "complementary_view",
     "make_labels",
     "random_truncate",

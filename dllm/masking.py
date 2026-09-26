@@ -23,6 +23,45 @@ class MaskingOutput:
     t: torch.Tensor  # (B,) float - sampled timesteps
 
 
+_T_SAMPLING = ("uniform", "stratified", "antithetic")
+
+
+def sample_times(
+    batch_size: int,
+    mode: str = "uniform",
+    generator: Optional[torch.Generator] = None,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Per-sample timesteps ``t`` in [0, 1) for one batch.
+
+    - ``"uniform"``: i.i.d. ``U(0, 1)``;
+    - ``"stratified"``: one draw in each of the ``B`` equal strata
+      ``[b/B, (b+1)/B)``, in random order (the low-discrepancy sampler of
+      VDM / MDLM);
+    - ``"antithetic"``: ``B/2`` draws ``u`` and their mirrors ``1 - u``
+      (``B`` must be even).
+
+    Every mode keeps each ``t`` marginally ``U(0, 1)``, so the batch-mean
+    loss stays unbiased; stratified and antithetic draws only reduce its
+    variance across batches.
+    """
+    if mode not in _T_SAMPLING:
+        raise ValueError(f"t sampling must be one of {_T_SAMPLING}")
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    if mode == "uniform":
+        return torch.rand(batch_size, device=device, generator=generator)
+    if mode == "stratified":
+        u = torch.rand(batch_size, device=device, generator=generator)
+        t = (torch.arange(batch_size, device=device) + u) / batch_size
+        order = torch.randperm(batch_size, generator=generator).to(t.device)
+        return t[order]
+    if batch_size % 2:
+        raise ValueError("antithetic sampling needs an even batch size")
+    u = torch.rand(batch_size // 2, device=device, generator=generator)
+    return torch.cat([u, 1.0 - u])
+
+
 def forward_process(
     input_ids: torch.Tensor,
     mask_token_id: int,
@@ -32,6 +71,7 @@ def forward_process(
     generator: Optional[torch.Generator] = None,
     min_one_mask: bool = False,
     tie_trailing_token_id: Optional[int] = None,
+    t_sampling: str = "uniform",
 ) -> MaskingOutput:
     """Apply the forward masking process.
 
@@ -52,6 +92,8 @@ def forward_process(
             ``p``, so ``p_mask`` and the ``1/p`` weight are unchanged. Dream
             locates the run by counting non-EOS tokens, which agrees with
             this suffix rule whenever the token appears only at the end.
+        t_sampling: how ``t`` is drawn when not given - "uniform",
+            "stratified" or "antithetic" (see :func:`sample_times`).
     """
     if input_ids.dim() != 2:
         raise ValueError(f"input_ids must be (B, L), got {tuple(input_ids.shape)}")
@@ -65,7 +107,7 @@ def forward_process(
         maskable_b = maskable.to(device=device, dtype=torch.bool)
 
     if t is None:
-        t = torch.rand(bsz, device=device, generator=generator)
+        t = sample_times(bsz, t_sampling, generator=generator, device=device)
     else:
         t = t.to(device=device, dtype=torch.float32)
         if t.shape != (bsz,):
