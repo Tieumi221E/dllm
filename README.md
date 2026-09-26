@@ -173,6 +173,28 @@ or integration tests, but is rejected by full-canvas diffusion sampling.
 Model-specific attention switching and cache semantics stay in explicit
 adapter hooks.
 
+AR-initialized denoisers such as Dream, DiffuCoder and Fast-dLLM v2 keep the
+source model's next-token head: output row `i` predicts position `i + 1`.
+Declare them with `prediction_field="shifted"`; `denoise()` then returns
+aligned same-position logits (`align_prediction_field`), so the samplers,
+losses and trajectory tools apply unchanged. Dream's own decoding schedule
+is `commit=TimestepQuotaCommitPolicy()` (`"timestep_quota"`), which matches
+the reference `diffusion_generate` step by step:
+
+```python
+model = TransformersDenoiserAdapter(
+    dream, prediction_field="shifted", default_topology="bidirectional"
+)
+out = generate_canvas(model, prompt, MASK, CanvasConfig(
+    gen_length=256, steps=256, commit="timestep_quota",
+    allow_mask_prediction=True,
+))
+```
+
+`list_presets(category="integration")` lists checkpoint metadata (mask, EOS
+and pad ids, prediction field, topology, block length, licence, revision)
+read from each checkpoint's own files.
+
 ### Sampling
 
 ```python
@@ -292,11 +314,17 @@ their exact 1.3.1 values.
 | complementary masking | off | `complementary_view(clean_ids, masking, MASK, maskable)` (each position masked in exactly one of two views) |
 | autoregressive auxiliary term | none | `next_token_loss(logits, target_ids, selected)` (caller supplies causal-attention logits) |
 | loss weight | `1/p` (bound-consistent) | `importance_weight=False` (uniform block SFT) |
-| schedule | `LinearSchedule(eps=1e-3)` | `CosineSchedule` (weight derived consistently) |
-| t sampling | uniform, always | - (non-uniform t without re-weighting is not a likelihood bound; use a schedule instead) |
+| schedule | `LinearSchedule(eps=1e-3)` | `CosineSchedule` (weight derived consistently); `ClippedLinearSchedule(low, high)` (rate uniform on [low, high]; BD3-LM, Dream `q_sample(min, max)`) |
+| t sampling | i.i.d. uniform | `t_sampling="stratified"` / `"antithetic"` (`sample_times`; marginally uniform, lower variance). Non-uniform t without re-weighting is not a likelihood bound; use a schedule instead |
+| corruption | absorbing mask (`forward_process`) | `uniform_forward_process` (uniform-state replacement, DiffusionGemma / Sumi; samplers do not decode it yet) |
+| token weight | `1/p` | `cart_weights(masked)` with `masked_cross_entropy(token_weight=..., reduction="token_mean")` (Dream CART) |
+| SFT padding | EOS, maskable, in the loss | `pad_mode="mask_ignored"` (Fast-dLLM v2), `pad_mode="dedicated"` + `pad_token_ids` (Rainbow / Void); `eos_as_one=True` (Dream `treat_eos_as_one`); `batch_cutoff=True` (Dream per-batch random cutoff) |
+| block SFT | answer norm | `content` / `force_mask` in the batch; `complementary_view(..., always_masked=batch["force_mask"])` |
+| prediction field | `"same_position"` | `"shifted"` (Dream-style, aligned by the adapter); `"next_token"` (AR, rejected by diffusion sampling) |
 | min_one_mask | off | on (tiny-batch efficiency; slight bias) |
 | EOS in SFT | maskable, learnable, counted | `non_maskable_ids` (EOS-collapse mitigation for tiny models) |
-| commit | `"transfer"` (top-k quota) | `"threshold"` (parallel decoding), custom `CommitPolicy` |
+| commit | `"transfer"` (top-k quota) | `"threshold"` (parallel decoding), `"timestep_quota"` (Dream; may idle on early steps), custom `CommitPolicy` |
+| EOS at inference | EOS is a normal token, stripped afterwards | `suppress_eos_logits`, `suppress_eos_confidence` (LLaDA), `stop_at_eos` (fill after the leftmost committed EOS; VoidPadding) |
 | temperature | `"gumbel"` fp64 | `"multinomial"` = softmax(logits/T) (different distribution at T!=1) |
 | confidence | `"prob"` raw-softmax | `"margin"`, `"neg_entropy"`, `"random"` |
 | canvas | full canvas (`generate_canvas`) | incremental (`generate_blockwise`) - truncated-canvas regime |
@@ -317,6 +345,9 @@ their exact 1.3.1 values.
   per-sample denominator (the response length), so it stays bound-consistent
   while removing the dilution; this matters whenever a diffusion model is
   compared against an autoregressive one trained with a per-token mean.
+- **Prediction alignment**: a shifted checkpoint read as same-position
+  decodes every token one position off. The field is declared once, at the
+  adapter, and every downstream tool consumes aligned logits.
 - **Canvas consistency**: a bidirectional model's logits depend on whether
   future [MASK] tokens are present. Training collator, sampler, and RL
   log-prob reconstruction must share one canvas regime; the API names it
@@ -345,6 +376,12 @@ invariance, cache-on/off generation equality, trajectory and policy scoring,
 self-speculation, preset composition, adapter capability failures, an optional
 tiny Transformers integration, and exact recovery of log V by the Monte Carlo
 likelihood estimator on a uniform-logits model.
+
+Conformance with Dream's reference code runs when `DLLM_DREAM_REFERENCE_DIR`
+points to unmodified copies of Dream's `generation_utils.py`, `gen_utils.py`
+and `fsdp_sft_trainer.py` (see `tests/_dream_reference.py`): decoding step by
+step, `q_sample` masking (clipped rates and `treat_eos_as_one`) bit for bit,
+and the CART weight matrix bit for bit. Without the files these tests skip.
 
 ## References
 

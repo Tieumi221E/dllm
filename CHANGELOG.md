@@ -16,10 +16,38 @@
   `min_prob`).
 - `next_token_loss`: shifted cross-entropy for an autoregressive auxiliary
   term next to a diffusion objective.
+- Prediction fields: `align_prediction_field` and
+  `TransformersDenoiserAdapter(prediction_field="shifted")` for Dream-style
+  checkpoints; `ModelCapabilities.native_prediction_field`.
+- `TimestepQuotaCommitPolicy` (`"timestep_quota"`): Dream's linear-timestep
+  quota. Policies may declare `allows_idle_steps`; samplers then bound a block
+  by its step budget (`progress_bound`).
+- `ClippedLinearSchedule(low, high)`: clipped masking rates.
+- `forward_process(tie_trailing_token_id=...)`: trailing EOS runs as one
+  masking unit; `forward_process(t_sampling=...)` and `sample_times` for
+  stratified / antithetic timesteps.
+- `SFTCollator(pad_mode, pad_token_ids, eos_as_one, batch_cutoff, rng)`:
+  ignored mask padding, dedicated pad tokens, per-batch random cutoff.
+- `cart_weights`: Dream's context-adaptive token weights.
+- `BlockSFTCollator` returns `content`, `content_lengths` and `force_mask`;
+  `complementary_view(always_masked=...)`.
+- `CanvasConfig(stop_at_eos=True)`: fill after the leftmost committed EOS.
+- `uniform_forward_process`: uniform-state corruption (process only).
+- Integration presets with checkpoint metadata for Dream-v0-Instruct-7B,
+  Dream-Coder-v0-Instruct-7B, DiffuCoder-7B-Instruct, iLLaDA-8B-Instruct,
+  Fast-dLLM v2 7B, SDAR-8B-Chat, TraDo-8B-Instruct and
+  Nemotron-Labs-Diffusion-8B. Forward equivalence with each official
+  implementation is not yet tested.
+- Opt-in conformance tests against Dream's reference code
+  (`DLLM_DREAM_REFERENCE_DIR`).
+
+### Fixed
+
+- `rl.py` docstring used a non-ASCII character.
 
 ### Compatibility
 
-- All defaults are unchanged; the new SFT batch keys are additive.
+- All defaults are unchanged; new batch keys and config fields are additive.
 
 ## 1.3.2
 
