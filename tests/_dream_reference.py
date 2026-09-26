@@ -17,7 +17,6 @@ import importlib.util
 import math
 import os
 
-import numpy as np
 import pytest
 import torch
 
@@ -50,6 +49,7 @@ def load_function(filename: str, name: str):
         tree = ast.parse(handle.read())
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
+            np = pytest.importorskip("numpy")  # the reference code uses numpy
             namespace = {"np": np, "torch": torch, "math": math}
             code = compile(ast.Module(body=[node], type_ignores=[]), path, "exec")
             exec(code, namespace)
