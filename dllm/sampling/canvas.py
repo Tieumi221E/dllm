@@ -10,6 +10,12 @@ Commit strategies:
 - "threshold": parallel decoding - commit everything with confidence >=
                threshold (min 1 per step).
 
+EOS stop (``stop_at_eos=True``): once an EOS is committed, every still
+masked position after the leftmost committed EOS is filled with EOS in the
+same step, so decoding ends when the positions before it are revealed
+(VoidPadding's stopping rule). Filled positions are not policy commits;
+the option is therefore not combinable with ``record_trace``.
+
 Prefix cache (``prefix_cache=True``): at each block start one full-canvas
 forward builds the cache, chopped at the block start; inner steps recompute
 only a window (block .. block+further_horizon). Higher fidelity than
@@ -71,6 +77,7 @@ class CanvasConfig:
     eos_token_id: Optional[int] = None
     suppress_eos_logits: bool = False  # forbid EOS in predictions
     suppress_eos_confidence: bool = False  # commit EOS last
+    stop_at_eos: bool = False  # fill after the leftmost committed EOS
     prefix_cache: bool = False
     further_horizon: Optional[int] = (
         None  # window size beyond block end; None -> suffix
@@ -164,9 +171,16 @@ def generate_canvas(
         raise ValueError("trace_topk must be non-negative")
     if cfg.trace_topk and not cfg.record_trace:
         raise ValueError("trace_topk requires record_trace=True")
-    if cfg.suppress_eos_logits or cfg.suppress_eos_confidence:
+    if cfg.suppress_eos_logits or cfg.suppress_eos_confidence or cfg.stop_at_eos:
         if cfg.eos_token_id is None:
-            raise ValueError("eos_token_id required for EOS suppression options")
+            raise ValueError("eos_token_id required for EOS options")
+    if cfg.stop_at_eos and cfg.record_trace:
+        raise ValueError(
+            "stop_at_eos fills positions outside the commit policy, which a "
+            "recorded trajectory cannot represent"
+        )
+    if cfg.stop_at_eos and cfg.suppress_eos_logits:
+        raise ValueError("stop_at_eos cannot trigger when EOS is suppressed")
 
     if prompt_ids.dim() == 1:
         prompt_ids = prompt_ids.unsqueeze(0)
@@ -316,6 +330,8 @@ def generate_canvas(
             sm = step_map[:, s - Lp : e - Lp]
             sm[commit] = global_step
             step_map[:, s - Lp : e - Lp] = sm
+            if cfg.stop_at_eos:
+                _fill_after_eos(x, step_map, Lp, mask_token_id, cfg.eos_token_id, global_step)
 
             global_step += 1
             i += 1
@@ -327,6 +343,24 @@ def generate_canvas(
     return CanvasOutput(
         canvas=x, responses=responses, step_map=step_map, nfe=nfe, traces=traces
     )
+
+
+def _fill_after_eos(x, step_map, Lp, mask_token_id, eos_token_id, step):
+    gen = x[:, Lp:]
+    is_eos = gen == eos_token_id
+    if not bool(is_eos.any()):
+        return
+    length = gen.shape[1]
+    first = torch.where(
+        is_eos.any(dim=1),
+        is_eos.to(torch.long).argmax(dim=1),
+        torch.full_like(is_eos[:, 0], length, dtype=torch.long),
+    )
+    after = torch.arange(length, device=x.device).unsqueeze(0) > first.unsqueeze(1)
+    fill = after & (gen == mask_token_id)
+    gen[fill] = eos_token_id
+    x[:, Lp:] = gen
+    step_map[fill] = step
 
 
 def _record(
