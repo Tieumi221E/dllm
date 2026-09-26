@@ -25,12 +25,10 @@ dllm/
   rl.py             trajectory state reconstruction + differentiable PPO primitives
   presets.py        composable model / recipe / integration presets
   validation.py     executable denoiser and cache-contract checks
-docs/architecture.md capability boundaries and admission policy
 tests/              semantic, adapter, preset, and compatibility tests
 ```
 
-The long-term package boundary and support tiers are described in
-[Architecture](docs/architecture.md). The stable core owns reusable dLLM
+The stable core owns reusable dLLM
 mechanisms; model/framework integrations are adapters, while datasets,
 task-specific rewards, and complete experiment loops stay downstream.
 See [Changelog](CHANGELOG.md) for versioned API changes.
