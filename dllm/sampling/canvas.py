@@ -37,6 +37,7 @@ from .policies import (
     CommitSpec,
     CommitState,
     apply_commit_policy,
+    progress_bound,
     resolve_commit_policy,
 )
 from .trace import (
@@ -237,7 +238,9 @@ def generate_canvas(
         )
 
         i = 0
-        max_iters = int(block_mask0.sum(dim=-1).max().item())
+        max_iters = progress_bound(
+            policy, int(block_mask0.sum(dim=-1).max().item()), cur_steps
+        )
         while bool((x[:, s:e] == mask_token_id).any()):
             if i >= max_iters:
                 raise RuntimeError(

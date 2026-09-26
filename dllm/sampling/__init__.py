@@ -12,7 +12,9 @@ from .policies import (
     CommitState,
     QuotaCommitPolicy,
     ThresholdCommitPolicy,
+    TimestepQuotaCommitPolicy,
     apply_commit_policy,
+    progress_bound,
     resolve_commit_policy,
 )
 from .speculative import (
@@ -52,7 +54,9 @@ __all__ = [
     "CommitState",
     "QuotaCommitPolicy",
     "ThresholdCommitPolicy",
+    "TimestepQuotaCommitPolicy",
     "apply_commit_policy",
+    "progress_bound",
     "resolve_commit_policy",
     "SelfSpecBackend",
     "SelfSpecConfig",

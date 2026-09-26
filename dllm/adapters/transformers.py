@@ -19,6 +19,7 @@ from ..models.protocol import (
     ModelCapabilities,
     extract_logits,
 )
+from ..prediction import align_prediction_field
 from ..topology import AttentionTopology
 
 TopologyAdapter = Callable[[AttentionTopology], Mapping[str, Any]]
@@ -33,8 +34,11 @@ class TransformersDenoiserAdapter:
 
     Args:
         model: A callable model with a ``forward`` method and HF-style output.
-        prediction_field: ``"same_position"`` for a diffusion denoiser or
-            ``"next_token"`` for an autoregressive model.
+        prediction_field: ``"same_position"`` for a diffusion denoiser
+            whose row ``i`` predicts position ``i``; ``"shifted"`` for an
+            AR-initialized denoiser whose row ``i`` predicts position
+            ``i + 1`` (Dream, DiffuCoder, Fast-dLLM v2); ``"next_token"``
+            for an autoregressive model.
         default_topology: Dependency structure used when no custom mask is
             passed to the wrapped model.
         attention_topologies: Topologies the wrapped model can implement.
@@ -47,9 +51,14 @@ class TransformersDenoiserAdapter:
     A next-token adapter may use :meth:`execute` for compatibility checks, but
     :meth:`denoise` rejects it so full-canvas generation cannot silently use
     autoregressive logits as same-position predictions.
+
+    A shifted adapter's :meth:`denoise` returns same-position logits (see
+    :func:`dllm.prediction.align_prediction_field`), so it advertises
+    ``"same_position"`` and records ``native_prediction_field="shifted"``;
+    :meth:`execute` still returns the raw rows.
     """
 
-    _PREDICTION_FIELDS = frozenset({"same_position", "next_token"})
+    _PREDICTION_FIELDS = frozenset({"same_position", "shifted", "next_token"})
     _RESERVED = frozenset(
         {
             "input_ids",
@@ -73,7 +82,8 @@ class TransformersDenoiserAdapter:
     ) -> None:
         if prediction_field not in self._PREDICTION_FIELDS:
             raise ValueError(
-                "prediction_field must be 'same_position' or 'next_token'"
+                "prediction_field must be 'same_position', 'shifted' or "
+                "'next_token'"
             )
         if not default_topology:
             raise ValueError("default_topology must be non-empty")
@@ -107,11 +117,13 @@ class TransformersDenoiserAdapter:
             parameter.kind is inspect.Parameter.VAR_KEYWORD
             for parameter in self._parameters.values()
         )
+        aligned = "same_position" if prediction_field == "shifted" else prediction_field
         self.capabilities = ModelCapabilities(
             attention_topologies=supported_topologies,
             explicit_position_ids=self._accepts("position_ids"),
             inputs_embeds=self._accepts("inputs_embeds"),
-            prediction_fields=frozenset({prediction_field}),
+            prediction_fields=frozenset({aligned}),
+            native_prediction_field=prediction_field,
         )
 
     def _accepts(self, name: str) -> bool:
@@ -227,13 +239,20 @@ class TransformersDenoiserAdapter:
         )
 
     def denoise(self, request: DenoiserInput) -> DenoiserOutput:
-        """Run a same-position denoiser, rejecting next-token checkpoints."""
-        if self.prediction_field != "same_position":
+        """Return same-position logits, rejecting next-token checkpoints.
+
+        Shifted rows are aligned on the full request sequence, which must
+        start at logical position 0 (see ``align_prediction_field``).
+        """
+        if self.prediction_field == "next_token":
             raise AdapterCapabilityError(
                 "denoising requires same-position logits; the wrapped model "
                 f"declares {self.prediction_field!r}"
             )
-        return self.execute(request)
+        output = self.execute(request)
+        if self.prediction_field == "shifted":
+            output.logits = align_prediction_field(output.logits, "shifted")
+        return output
 
 
 __all__ = [

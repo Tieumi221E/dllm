@@ -8,7 +8,7 @@ mechanisms, so position policies can evolve without changing token semantics.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Protocol, Union, runtime_checkable
+from typing import ClassVar, Optional, Protocol, Union, runtime_checkable
 
 import torch
 
@@ -104,6 +104,60 @@ class ThresholdCommitPolicy:
         )
 
 
+@dataclass(frozen=True)
+class TimestepQuotaCommitPolicy:
+    """Dream's linear-timestep quota (``alg="maskgit_plus"`` and relatives).
+
+    With ``timesteps = linspace(1, eps, steps + 1)``, step ``i`` commits
+    ``int(n * (1 - s / t))`` of the ``n`` currently masked positions, where
+    ``t, s = timesteps[i], timesteps[i + 1]``; the last planned step commits
+    all of them. The quota is computed in float32 like the reference code.
+
+    Early steps may commit nothing when ``n`` is small, so this policy
+    declares ``allows_idle_steps``: samplers then bound a block by its step
+    budget instead of requiring one commit per step. Dream computes ``n`` as
+    the batch-mean mask count and uses one quota for every row; this policy
+    uses each row's own count, which is identical for batch size 1 and for
+    rows with equal mask counts.
+
+    Reference: ``_sample`` in ``generation_utils.py`` of the Dream-v0
+    checkpoints (https://github.com/DreamLM/Dream).
+    """
+
+    eps: float = 1e-3
+    allows_idle_steps: ClassVar[bool] = True
+
+    def __post_init__(self) -> None:
+        if not 0.0 < self.eps < 1.0:
+            raise ValueError("eps must be in (0, 1)")
+
+    def select(self, state: CommitState) -> CommitDecision:
+        n = state.candidates.sum(dim=1)
+        if state.step >= state.steps - 1:
+            quota = n
+        else:
+            timesteps = torch.linspace(
+                1, self.eps, state.steps + 1, device=state.confidence.device
+            )
+            t, s = timesteps[state.step], timesteps[state.step + 1]
+            quota = (n.to(torch.float32) * (1 - s / t)).to(torch.long)
+        return CommitDecision(
+            select_topk_commits(
+                state.confidence,
+                quota,
+                candidates=state.candidates,
+            )
+        )
+
+
+def progress_bound(policy: "CommitPolicy", masked: int, steps: int) -> int:
+    """Iteration bound for one block: one commit per step, or the step
+    budget as well for policies that declare ``allows_idle_steps``."""
+    if getattr(policy, "allows_idle_steps", False):
+        return masked + steps
+    return masked
+
+
 CommitSpec = Union[str, CommitPolicy]
 
 
@@ -149,7 +203,10 @@ def apply_commit_policy(
 
     active = state.candidates.any(dim=-1)
     stalled = active & ~commit.any(dim=-1)
-    if bool(stalled.any()):
+    idle_ok = getattr(policy, "allows_idle_steps", False) and (
+        state.step < state.steps - 1
+    )
+    if bool(stalled.any()) and not idle_ok:
         raise ValueError(
             "a commit policy must select at least one position for every "
             "active batch row"
@@ -176,6 +233,8 @@ __all__ = [
     "CommitState",
     "QuotaCommitPolicy",
     "ThresholdCommitPolicy",
+    "TimestepQuotaCommitPolicy",
     "apply_commit_policy",
+    "progress_bound",
     "resolve_commit_policy",
 ]

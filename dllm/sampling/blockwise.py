@@ -28,6 +28,7 @@ from .policies import (
     CommitSpec,
     CommitState,
     apply_commit_policy,
+    progress_bound,
     resolve_commit_policy,
 )
 from .utils import (
@@ -158,7 +159,7 @@ def generate_blockwise(
             prefix_act = prefix_no_cache[act_idx] if not cfg.use_cache else None
 
             i = 0
-            max_iters = actual
+            max_iters = progress_bound(policy, actual, cfg.steps_per_block)
             while True:
                 masked = blk_x == mask_token_id
                 if not masked.any():

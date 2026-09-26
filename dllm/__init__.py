@@ -21,6 +21,7 @@ from .masking import (
     random_truncate,
 )
 from .loss import diffusion_loss, masked_cross_entropy, mc_conditional_nll, next_token_loss
+from .prediction import PREDICTION_FIELDS, align_prediction_field
 from .data import PretrainCollator, SFTCollator, BlockSFTCollator
 from .topology import (
     AttentionTopology,
@@ -55,6 +56,7 @@ from .sampling import (
     CommitState as CommitState,
     QuotaCommitPolicy,
     ThresholdCommitPolicy,
+    TimestepQuotaCommitPolicy,
     apply_commit_policy as apply_commit_policy,
     resolve_commit_policy as resolve_commit_policy,
     SelfSpecBackend,
@@ -103,6 +105,9 @@ __all__ = [
     "masked_cross_entropy",
     "mc_conditional_nll",
     "next_token_loss",
+    # prediction fields
+    "PREDICTION_FIELDS",
+    "align_prediction_field",
     # data
     "PretrainCollator",
     "SFTCollator",
@@ -125,6 +130,7 @@ __all__ = [
     "CommitPolicy",
     "QuotaCommitPolicy",
     "ThresholdCommitPolicy",
+    "TimestepQuotaCommitPolicy",
     "SelfSpecBackend",
     "SelfSpecConfig",
     "SelfSpecOutput",

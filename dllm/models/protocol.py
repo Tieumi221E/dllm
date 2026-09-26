@@ -46,6 +46,9 @@ class ModelCapabilities:
     inputs_embeds: bool = False
     cache_semantics: FrozenSet[str] = frozenset()
     prediction_fields: FrozenSet[str] = frozenset()
+    # the checkpoint's own output convention when ``denoise`` returns an
+    # aligned view of it (e.g. "shifted" aligned to "same_position")
+    native_prediction_field: Optional[str] = None
 
 
 @runtime_checkable
