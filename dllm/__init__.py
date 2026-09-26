@@ -26,7 +26,13 @@ from .masking import (
     make_labels,
     random_truncate,
 )
-from .loss import diffusion_loss, masked_cross_entropy, mc_conditional_nll, next_token_loss
+from .loss import (
+    cart_weights,
+    diffusion_loss,
+    masked_cross_entropy,
+    mc_conditional_nll,
+    next_token_loss,
+)
 from .prediction import PREDICTION_FIELDS, align_prediction_field
 from .data import PretrainCollator, SFTCollator, BlockSFTCollator
 from .topology import (
@@ -112,6 +118,7 @@ __all__ = [
     "masked_cross_entropy",
     "mc_conditional_nll",
     "next_token_loss",
+    "cart_weights",
     # prediction fields
     "PREDICTION_FIELDS",
     "align_prediction_field",

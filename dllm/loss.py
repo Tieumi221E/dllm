@@ -3,13 +3,15 @@
 ``diffusion_loss``: masked cross-entropy with 1/p importance weighting and
 explicit normalization choices (``norm="tokens"`` for pretraining,
 ``"answer"`` for SFT, ``"content"`` for SFT whose padding should not dilute
-the response). ``next_token_loss``: shifted cross-entropy for an
+the response). ``cart_weights``: Dream's context-adaptive token weights.
+``next_token_loss``: shifted cross-entropy for an
 autoregressive auxiliary term. ``mc_conditional_nll``: low-variance
 Monte-Carlo estimator of the conditional NLL bound.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Callable, Optional
 
 import torch
@@ -231,6 +233,57 @@ def diffusion_loss(
     if norm == "masked":
         return token_ce.sum() / masked_indices.sum().clamp(min=1).to(token_ce.dtype)
     return token_ce.sum()
+
+
+def cart_weights(
+    masked_indices: torch.Tensor,
+    cart_p: float = 0.1,
+    context: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Context-adaptive token weights (CART) for masked positions.
+
+    A masked position ``i`` gets ``sum_j c_j * g(|i - j|)`` over the clean
+    positions ``j``, with the symmetric geometric kernel
+    ``g(k) = 0.5 * cart_p * (1 - cart_p)**(k - 1)`` for ``k >= 1`` and
+    ``g(0) = 0``; clean positions get weight 0. A masked token surrounded by
+    clean context is weighted up, one deep inside a masked span is weighted
+    down. The weight replaces the ``1/t`` time weight; Dream then divides
+    the weighted sum by the number of masked tokens, i.e.::
+
+        masked_cross_entropy(logits, target, masked,
+                             token_weight=cart_weights(masked),
+                             reduction="token_mean")
+
+    Args:
+        masked_indices: (B, L) bool.
+        cart_p: kernel parameter in (0, 1); Dream's Tulu3 recipe uses 0.1.
+        context: (B, L) bool - positions allowed to count as clean context.
+            ``None`` counts every unmasked position, prompt included, as
+            the reference implementation does; pass the attention mask to
+            exclude batch padding.
+
+    Reference: ``context_adaptive_reweight`` and ``time_reweighting="cart"``
+    in Dream's official trainer (https://github.com/DreamLM/Dream), computed
+    here with the same float32 operations.
+    """
+    if masked_indices.ndim != 2:
+        raise ValueError("masked_indices must have shape (B, L)")
+    if not 0.0 < cart_p < 1.0:
+        raise ValueError("cart_p must be in (0, 1)")
+    masked = masked_indices.to(torch.bool)
+    clean = ~masked
+    if context is not None:
+        if context.shape != masked.shape:
+            raise ValueError("context must have shape (B, L)")
+        clean = clean & context.to(device=masked.device, dtype=torch.bool)
+    length = masked.shape[1]
+    positions = torch.arange(length, device=masked.device)
+    distance = positions.view(-1, 1) - positions.view(1, -1)
+    kernel = (
+        math.log(cart_p) + (distance.abs() - 1) * math.log(1 - cart_p)
+    ).exp() * 0.5
+    kernel = kernel.masked_fill(distance == 0, 0)
+    return clean.to(kernel.dtype).matmul(kernel).masked_fill(~masked, 0)
 
 
 def next_token_loss(
