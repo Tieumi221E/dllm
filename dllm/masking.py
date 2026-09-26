@@ -8,7 +8,7 @@ matrix so losses can weight each token by its own masking probability.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 
 import torch
 
@@ -94,6 +94,68 @@ def forward_process(
     noisy_ids = torch.where(masked_indices, mask_token_id, input_ids)
     return MaskingOutput(
         noisy_ids=noisy_ids, masked_indices=masked_indices, p_mask=p_mask, t=t
+    )
+
+
+def uniform_forward_process(
+    input_ids: torch.Tensor,
+    vocab_size: int,
+    maskable: Optional[torch.Tensor] = None,
+    t: Optional[torch.Tensor] = None,
+    schedule: Union[str, NoiseSchedule, None] = None,
+    generator: Optional[torch.Generator] = None,
+    exclude_token_ids: Sequence[int] = (),
+) -> MaskingOutput:
+    """Uniform-state (multinomial) corruption instead of absorbing masking.
+
+    Each maskable token is selected with probability ``p = schedule(t)`` and
+    replaced by a token drawn uniformly from the vocabulary minus
+    ``exclude_token_ids`` (e.g. mask, pad and other special ids). A
+    replacement may equal the original token, as in multinomial diffusion.
+    ``masked_indices`` marks the selected positions. There is no mask token
+    in ``noisy_ids``, so a model cannot tell which positions were corrupted.
+
+    DiffusionGemma (arXiv 2608.00146, sec. 4) trains on this process with
+    cross-entropy over every canvas position divided by the canvas size,
+    i.e. ``masked_cross_entropy(logits, clean, maskable,
+    reduction="sample_mean")`` for one canvas per sample; Sumi-7B
+    (arXiv 2606.19005) is a uniform-state model trained from scratch. The
+    samplers in this package assume absorbing masks and do not decode such
+    models yet.
+    """
+    if input_ids.dim() != 2:
+        raise ValueError(f"input_ids must be (B, L), got {tuple(input_ids.shape)}")
+    device = input_ids.device
+    bsz, seq_len = input_ids.shape
+    excluded = set(int(i) for i in exclude_token_ids)
+    allowed = torch.tensor(
+        [i for i in range(vocab_size) if i not in excluded],
+        dtype=torch.long,
+        device=device,
+    )
+    if allowed.numel() == 0:
+        raise ValueError("no token left to sample after exclusions")
+    sched = get_schedule(schedule)
+    maskable_b = (
+        torch.ones_like(input_ids, dtype=torch.bool)
+        if maskable is None
+        else maskable.to(device=device, dtype=torch.bool)
+    )
+    if t is None:
+        t = torch.rand(bsz, device=device, generator=generator)
+    else:
+        t = t.to(device=device, dtype=torch.float32)
+        if t.shape != (bsz,):
+            raise ValueError(f"t must be shape ({bsz},), got {tuple(t.shape)}")
+    p_mask = sched.mask_prob(t).unsqueeze(1).expand(bsz, seq_len).contiguous()
+    rand = torch.rand(bsz, seq_len, device=device, generator=generator)
+    selected = (rand < p_mask) & maskable_b
+    picks = torch.randint(
+        0, allowed.numel(), (bsz, seq_len), device=device, generator=generator
+    )
+    noisy_ids = torch.where(selected, allowed[picks], input_ids)
+    return MaskingOutput(
+        noisy_ids=noisy_ids, masked_indices=selected, p_mask=p_mask, t=t
     )
 
 

@@ -25,6 +25,7 @@ from .masking import (
     forward_process,
     make_labels,
     random_truncate,
+    uniform_forward_process,
 )
 from .loss import (
     cart_weights,
@@ -110,6 +111,7 @@ __all__ = [
     "get_schedule",
     "MaskingOutput",
     "forward_process",
+    "uniform_forward_process",
     "complementary_view",
     "make_labels",
     "random_truncate",
