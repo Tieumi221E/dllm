@@ -16,13 +16,26 @@ uses ``norm="answer"`` for bound-consistent weighting, or
 ``SFTCollator`` also returns ``content`` (the real response plus its one
 terminal EOS, without padding) for ``norm="content"``, and can pad every
 response to a fixed ``response_canvas`` so training matches a fixed
-generation length at inference.
+generation length at inference. Its padding switches:
+
+- ``pad_mode="eos"`` (default): padding is EOS, maskable and in the loss
+  (LLaDA, Dream); ``eos_as_one=True`` masks each trailing EOS run as one unit
+  (Dream's ``treat_eos_as_one``);
+- ``pad_mode="mask_ignored"``: padding is the mask token, attended but
+  neither maskable nor in the loss (Fast-dLLM v2);
+- ``pad_mode="dedicated"``: padding cycles through ``pad_token_ids``,
+  maskable and in the loss; one id is VoidPadding's ``[VOID]``, several ids
+  are Rainbow Padding. Forbid those ids at inference with
+  ``suppress_token_ids``;
+- ``batch_cutoff=True``: per batch, one sample's response length is drawn
+  as the common response length; longer responses are cut, shorter ones
+  padded (Dream's ``perbatch_cutoff_type="random_with_input_pad"``).
 """
 
 from __future__ import annotations
 
 import random
-from typing import Dict, List, Optional, Set, Union
+from typing import Dict, List, Optional, Sequence, Set, Union
 
 import torch
 
@@ -108,6 +121,11 @@ class SFTCollator:
         min_one_mask: bool = False,
         generator: Optional[torch.Generator] = None,
         response_canvas: Optional[int] = None,
+        pad_mode: str = "eos",
+        pad_token_ids: Sequence[int] = (),
+        eos_as_one: bool = False,
+        batch_cutoff: bool = False,
+        rng: Optional[random.Random] = None,
     ):
         """
         Args:
@@ -117,9 +135,36 @@ class SFTCollator:
                 sample's canvas that exist only because another sample in the
                 batch is longer are batch padding: not attended, not
                 maskable. A response longer than the canvas raises.
+            pad_mode: "eos", "mask_ignored" or "dedicated" (module docstring).
+            pad_token_ids: the dedicated padding ids, used cyclically.
+            eos_as_one: tie each trailing EOS run into one masking unit
+                (only with ``pad_mode="eos"``).
+            batch_cutoff: draw a common response length per batch from the
+                batch's content lengths (with ``rng``); not combinable with
+                ``response_canvas``. Dream draws from response lengths that
+                exclude tokens equal to its pad id; here the drawn lengths
+                include the terminal EOS.
         """
         if response_canvas is not None and response_canvas < 1:
             raise ValueError("response_canvas must be a positive length")
+        if pad_mode not in ("eos", "mask_ignored", "dedicated"):
+            raise ValueError("pad_mode must be 'eos', 'mask_ignored' or 'dedicated'")
+        if pad_mode == "dedicated":
+            if not pad_token_ids:
+                raise ValueError("pad_mode='dedicated' needs pad_token_ids")
+            if eos_token_id in pad_token_ids or mask_token_id in pad_token_ids:
+                raise ValueError("dedicated pad ids must differ from EOS and mask")
+        elif pad_token_ids:
+            raise ValueError("pad_token_ids requires pad_mode='dedicated'")
+        if eos_as_one and pad_mode != "eos":
+            raise ValueError("eos_as_one applies to pad_mode='eos' only")
+        if batch_cutoff and response_canvas is not None:
+            raise ValueError("batch_cutoff and response_canvas are exclusive")
+        self.pad_mode = pad_mode
+        self.pad_token_ids = tuple(pad_token_ids)
+        self.eos_as_one = eos_as_one
+        self.batch_cutoff = batch_cutoff
+        self.rng = rng or random.Random()
         self.mask_token_id = mask_token_id
         self.eos_token_id = eos_token_id
         self.max_length = max_length
@@ -131,19 +176,27 @@ class SFTCollator:
         self.response_canvas = response_canvas
 
     def __call__(self, batch: List[Dict[str, List[int]]]) -> Dict[str, torch.Tensor]:
-        seqs, prompt_lens, content_lens = [], [], []
+        pairs = []
         for ex in batch:
             p, r = list(ex["prompt_ids"]), list(ex["response_ids"])
             if self.append_eos and (not r or r[-1] != self.eos_token_id):
                 r = r + [self.eos_token_id]
+            pairs.append((p, r))
+        canvas = self.response_canvas
+        if self.batch_cutoff:
+            canvas = self.rng.choice([len(r) for _, r in pairs])
+            pairs = [(p, r[:canvas]) for p, r in pairs]
+
+        seqs, prompt_lens, content_lens = [], [], []
+        for p, r in pairs:
             content_lens.append(len(r))
-            if self.response_canvas is not None:
-                if len(r) > self.response_canvas:
+            if canvas is not None:
+                if len(r) > canvas:
                     raise ValueError(
                         f"response of {len(r)} tokens exceeds response_canvas="
-                        f"{self.response_canvas}"
+                        f"{canvas}"
                     )
-                r = r + [self.eos_token_id] * (self.response_canvas - len(r))
+                r = r + [self.eos_token_id] * (canvas - len(r))
             seqs.append(p + r)
             prompt_lens.append(len(p))
 
@@ -160,10 +213,10 @@ class SFTCollator:
 
         positions = torch.arange(width).unsqueeze(0)
         maskable = positions >= prompt_lens_t.unsqueeze(1)  # response + EOS pads
-        if self.response_canvas is not None:
+        if canvas is not None:
             # a fixed canvas ends every sample at prompt + canvas; anything
             # beyond it is batch padding
-            in_canvas = positions < (prompt_lens_t + self.response_canvas).unsqueeze(1)
+            in_canvas = positions < (prompt_lens_t + canvas).unsqueeze(1)
             maskable &= in_canvas
             attn = in_canvas.to(torch.long).expand(len(seqs), width).clone()
         else:
@@ -171,6 +224,14 @@ class SFTCollator:
         content = maskable & (
             positions < (prompt_lens_t + content_lens_t).unsqueeze(1)
         )
+        padding = maskable & ~content
+        if self.pad_mode == "mask_ignored":
+            ids = ids.masked_fill(padding, self.mask_token_id)
+            maskable = maskable & ~padding
+        elif self.pad_mode == "dedicated":
+            table = torch.tensor(self.pad_token_ids, dtype=torch.long)
+            order = (padding.cumsum(dim=1) - 1).clamp(min=0) % len(table)
+            ids = torch.where(padding, table[order], ids)
         if self.non_maskable_ids:
             for tok in self.non_maskable_ids:
                 maskable &= ids != tok
@@ -182,6 +243,7 @@ class SFTCollator:
             schedule=self.schedule,
             generator=self.generator,
             min_one_mask=self.min_one_mask,
+            tie_trailing_token_id=self.eos_token_id if self.eos_as_one else None,
         )
         answer_lengths = maskable.sum(dim=1)
         return {

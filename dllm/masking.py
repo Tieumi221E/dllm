@@ -31,6 +31,7 @@ def forward_process(
     schedule: Union[str, NoiseSchedule, None] = None,
     generator: Optional[torch.Generator] = None,
     min_one_mask: bool = False,
+    tie_trailing_token_id: Optional[int] = None,
 ) -> MaskingOutput:
     """Apply the forward masking process.
 
@@ -44,6 +45,13 @@ def forward_process(
         min_one_mask: force >=1 masked token per sample. Off by default -
             forcing a mask slightly biases the estimator; enable only for
             tiny-batch regimes where zero-mask samples are too wasteful.
+        tie_trailing_token_id: treat each row's trailing run of this token
+            (maskable positions only) as one unit: the whole run takes the
+            masking draw of its first position (Dream's ``treat_eos_as_one``).
+            Every run position is still masked with marginal probability
+            ``p``, so ``p_mask`` and the ``1/p`` weight are unchanged. Dream
+            locates the run by counting non-EOS tokens, which agrees with
+            this suffix rule whenever the token appears only at the end.
     """
     if input_ids.dim() != 2:
         raise ValueError(f"input_ids must be (B, L), got {tuple(input_ids.shape)}")
@@ -78,10 +86,40 @@ def forward_process(
             rows = torch.nonzero(needs, as_tuple=True)[0]
             masked_indices[rows, pick[rows]] = True
 
+    if tie_trailing_token_id is not None:
+        masked_indices = tie_trailing_run(
+            input_ids, masked_indices, maskable_b, tie_trailing_token_id
+        )
+
     noisy_ids = torch.where(masked_indices, mask_token_id, input_ids)
     return MaskingOutput(
         noisy_ids=noisy_ids, masked_indices=masked_indices, p_mask=p_mask, t=t
     )
+
+
+def trailing_run(
+    input_ids: torch.Tensor, maskable: torch.Tensor, token_id: int
+) -> torch.Tensor:
+    """(B, L) bool: each row's maximal suffix of maskable ``token_id``."""
+    hit = (input_ids == token_id) & maskable.to(torch.bool)
+    return torch.cumprod(hit.flip(1).to(torch.long), dim=1).flip(1).bool()
+
+
+def tie_trailing_run(
+    input_ids: torch.Tensor,
+    masked_indices: torch.Tensor,
+    maskable: torch.Tensor,
+    token_id: int,
+) -> torch.Tensor:
+    """Give every position of the trailing run its first position's draw."""
+    run = trailing_run(input_ids, maskable, token_id)
+    lengths = run.sum(dim=1)
+    has_run = lengths > 0
+    if not bool(has_run.any()):
+        return masked_indices
+    first = (input_ids.shape[1] - lengths).clamp(max=input_ids.shape[1] - 1)
+    draw = masked_indices.gather(1, first.unsqueeze(1)).expand_as(run)
+    return torch.where(run & has_run.unsqueeze(1), draw, masked_indices)
 
 
 def complementary_view(
