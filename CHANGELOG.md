@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 1.4.0
+
+Version 1.4.0 adds the training and decoding recipes of the main open dLLM
+families as explicit switches: shifted (Dream-style) prediction, Dream's
+timestep-quota decoding, clipped masking rates, SFT padding strategies, CART
+weights, content normalization, EOS stopping, uniform-state corruption and
+variance-reduced timestep sampling. Dream-v0-Instruct-7B and LLaDA-8B-Instruct
+decode token-identically to their official samplers through dllm.
 
 ### Added
 

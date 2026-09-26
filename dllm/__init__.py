@@ -10,7 +10,7 @@ Adapters:   explicit framework capability and execution bridges
 References for the algorithms are listed in the README.
 """
 
-__version__ = "1.3.2"
+__version__ = "1.4.0"
 
 from .schedules import (
     NoiseSchedule,
