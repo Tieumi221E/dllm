@@ -128,6 +128,7 @@ def complementary_view(
     mask_token_id: int,
     maskable: Optional[torch.Tensor] = None,
     min_prob: float = 1e-3,
+    always_masked: Optional[torch.Tensor] = None,
 ) -> MaskingOutput:
     """The complementary masked view of a ``forward_process`` output.
 
@@ -148,6 +149,9 @@ def complementary_view(
         maskable: (B, L) bool - the same eligibility mask passed to
             ``forward_process``; ``None`` means every position.
         min_prob: lower bound for the complement's mask probability.
+        always_masked: (B, L) bool - positions shown as the mask token in
+            both views but outside the loss (the later blocks of a full-canvas
+            block SFT batch, ``batch["force_mask"]``).
     """
     if clean_ids.shape != masking.masked_indices.shape:
         raise ValueError("clean_ids must match the masking output's shape")
@@ -160,7 +164,15 @@ def complementary_view(
         maskable_b = maskable.to(device=device, dtype=torch.bool)
     masked = maskable_b & ~masking.masked_indices.to(device=device, dtype=torch.bool)
     p_mask = (1.0 - masking.p_mask.to(device)).clamp(min=min_prob)
-    noisy_ids = torch.where(masked, mask_token_id, clean_ids)
+    shown = masked
+    if always_masked is not None:
+        if always_masked.shape != clean_ids.shape:
+            raise ValueError("always_masked must match clean_ids")
+        always = always_masked.to(device=device, dtype=torch.bool)
+        if bool((always & maskable_b).any()):
+            raise ValueError("always_masked positions cannot be maskable")
+        shown = masked | always
+    noisy_ids = torch.where(shown, mask_token_id, clean_ids)
     return MaskingOutput(
         noisy_ids=noisy_ids, masked_indices=masked, p_mask=p_mask, t=1.0 - masking.t
     )

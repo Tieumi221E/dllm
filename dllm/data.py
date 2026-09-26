@@ -269,6 +269,15 @@ class BlockSFTCollator:
     ``canvas="truncated"`` drops everything after block k (pairs with
     blockwise inference); ``canvas="full"`` keeps later blocks fully masked
     (pairs with canvas inference).
+
+    Besides the masking artefacts the batch carries ``content`` (the target
+    block's real response tokens plus the terminal EOS, without the EOS
+    padding that completes the last block) for ``norm="content"``, and
+    ``force_mask`` (the later blocks of a full canvas: masked in the input,
+    never in the loss). Padding only completes the last block, so every
+    target block holds at least one content token. For complementary
+    masking pass ``force_mask`` as ``always_masked`` to
+    :func:`dllm.masking.complementary_view`.
     """
 
     def __init__(
@@ -304,6 +313,7 @@ class BlockSFTCollator:
             p, r = list(ex["prompt_ids"]), list(ex["response_ids"])
             if not r or r[-1] != self.eos_token_id:
                 r = r + [self.eos_token_id]
+            n_content = len(r)
             r = r + [self.eos_token_id] * ((-len(r)) % BL)
             n_blocks = len(r) // BL
             k = self.rng.randrange(n_blocks)
@@ -315,9 +325,10 @@ class BlockSFTCollator:
                 # drop rather than silently truncate through the target block
                 continue
             block_start = len(p) + k * BL
+            content_end = len(p) + n_content
             mrow = [False] * len(seq)
             for j in range(block_start, block_start + BL):
-                mrow[j] = True
+                mrow[j] = "content" if j < content_end else True
             if self.canvas == "full":
                 # later blocks: fully masked context, never in the loss
                 for j in range(block_start + BL, len(seq)):
@@ -331,11 +342,13 @@ class BlockSFTCollator:
         width = ids.shape[1]
         B = ids.shape[0]
         maskable = torch.zeros(B, width, dtype=torch.bool)
+        content = torch.zeros(B, width, dtype=torch.bool)
         force_mask = torch.zeros(B, width, dtype=torch.bool)
         for i, (_, mrow) in enumerate(seqs):
             for j, v in enumerate(mrow):
-                if v is True:
+                if v is True or v == "content":
                     maskable[i, j] = True
+                    content[i, j] = v == "content"
                 elif v is None:
                     force_mask[i, j] = True
 
@@ -359,4 +372,7 @@ class BlockSFTCollator:
             "p_mask": m.p_mask,
             "t": m.t,
             "answer_lengths": maskable.sum(dim=1),  # == BL per sample
+            "content": content,
+            "content_lengths": content.sum(dim=1),
+            "force_mask": force_mask,
         }
