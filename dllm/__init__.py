@@ -12,7 +12,13 @@ References for the algorithms are listed in the README.
 
 __version__ = "1.3.2"
 
-from .schedules import NoiseSchedule, LinearSchedule, CosineSchedule, get_schedule
+from .schedules import (
+    NoiseSchedule,
+    LinearSchedule,
+    CosineSchedule,
+    ClippedLinearSchedule,
+    get_schedule,
+)
 from .masking import (
     MaskingOutput,
     complementary_view,
@@ -94,6 +100,7 @@ __all__ = [
     "NoiseSchedule",
     "LinearSchedule",
     "CosineSchedule",
+    "ClippedLinearSchedule",
     "get_schedule",
     "MaskingOutput",
     "forward_process",

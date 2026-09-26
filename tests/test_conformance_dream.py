@@ -3,16 +3,12 @@
 The unit tests need nothing external. The conformance test compares
 ``generate_canvas`` (shifted adapter + ``TimestepQuotaCommitPolicy``) with
 Dream's own ``_sample`` loop, step by step, on a context-dependent fake
-model. It runs only when ``DLLM_DREAM_GENERATION_UTILS`` points to a copy of
-``generation_utils.py`` from a Dream-v0 checkpoint (for example
-https://huggingface.co/Dream-org/Dream-v0-Instruct-7B) and ``transformers``
-is installed; the reference file is not vendored.
+model. It runs only when the reference files are available (see
+``_dream_reference.py``) and ``transformers`` is installed.
 """
 
 from __future__ import annotations
 
-import importlib.util
-import os
 from types import SimpleNamespace
 
 import pytest
@@ -21,6 +17,8 @@ import torch
 from dllm import CanvasConfig, TimestepQuotaCommitPolicy, generate_canvas
 from dllm.adapters import TransformersDenoiserAdapter
 from dllm.sampling import CommitState, apply_commit_policy
+
+from _dream_reference import load_module
 
 VOCAB, MASK = 40, 39
 
@@ -116,14 +114,8 @@ def test_timestep_policy_decodes_to_completion():
 
 
 def _load_reference():
-    path = os.environ.get("DLLM_DREAM_GENERATION_UTILS")
-    if not path or not os.path.exists(path):
-        pytest.skip("set DLLM_DREAM_GENERATION_UTILS to Dream's generation_utils.py")
     pytest.importorskip("transformers")
-    spec = importlib.util.spec_from_file_location("dream_generation_utils", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_module("generation_utils.py")
 
 
 @pytest.mark.parametrize(

@@ -80,8 +80,42 @@ class CosineSchedule(NoiseSchedule):
         return (1.0 - self.eps) * (math.pi / 2) * math.sin(math.pi * t / 2)
 
 
+class ClippedLinearSchedule(NoiseSchedule):
+    """Masking rate uniform on ``[low, high]``: p(t) = low + (high-low)*t.
+
+    Clipping keeps the rate away from the extremes, where the gradient is
+    high-variance (almost nothing masked) or carries only marginal
+    information (almost everything masked). ``low=eps, high=1`` is exactly
+    ``LinearSchedule(eps)``. The per-token importance weight stays ``1/p``,
+    which keeps each ``t``'s estimate unbiased for that ``t``; clipping
+    changes which rates are trained, not the estimator.
+
+    References: clipped masking rates, BD3-LM (arXiv 2503.09573, sec. 5.2);
+    ``q_sample(min, max)`` in Dream's official trainer; the SFT mask-ratio
+    bandwidth of LLaDA2.0 (arXiv 2512.15745, sec. 5.1).
+    """
+
+    def __init__(self, low: float = 1e-3, high: float = 1.0):
+        if not 0.0 <= low < high <= 1.0:
+            raise ValueError("need 0 <= low < high <= 1")
+        self.low = low
+        self.high = high
+
+    def mask_prob(self, t: Number) -> Number:
+        return self.low + (self.high - self.low) * t
+
+    def mask_prob_derivative(self, t: Number) -> Number:
+        if isinstance(t, torch.Tensor):
+            return torch.full_like(t, self.high - self.low)
+        return self.high - self.low
+
+    def weight(self, t: Number) -> Number:
+        return 1.0 / self.mask_prob(t)
+
+
 def get_schedule(schedule: Union[str, NoiseSchedule, None]) -> NoiseSchedule:
-    """Resolve a schedule by instance, name ('linear', 'cosine'), or None (linear)."""
+    """Resolve a schedule by instance, name ('linear', 'cosine', 'clippedlinear'),
+    or None (linear)."""
     if schedule is None:
         return LinearSchedule()
     if isinstance(schedule, NoiseSchedule):
