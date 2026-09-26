@@ -254,6 +254,165 @@ _register(
 )
 
 
+# Checkpoint facts below were read from each repository's config.json,
+# generation_config.json, tokenizer_config.json and modeling / generation
+# code at the recorded revision (2026-09-27). ``prediction_field`` follows
+# dllm.prediction; ``topology`` is the attention the checkpoint was trained
+# with. Where the config and tokenizer disagree, both are recorded.
+
+
+def _checkpoint(
+    name: str,
+    description: str,
+    *,
+    hf_model: str,
+    revision: str,
+    license: str,
+    prediction_field: str,
+    topology: str,
+    tokens: Mapping[str, Any],
+    reference: str,
+    block_length: Optional[int] = None,
+    extra: Optional[Mapping[str, Any]] = None,
+) -> None:
+    config: Dict[str, Any] = {
+        "hf_model": hf_model,
+        "revision": revision,
+        "license": license,
+        "prediction_field": prediction_field,
+        "topology": topology,
+        **tokens,
+    }
+    if block_length is not None:
+        config["block_length"] = block_length
+    config.update(extra or {})
+    _register(
+        name,
+        "integration",
+        description,
+        config,
+        requires={prediction_field, topology, "transformers"},
+        reference=reference,
+    )
+
+
+_DREAM_REF = "https://github.com/DreamLM/Dream"
+_DREAM_DECODING = {"commit_policy": "timestep_quota", "timestep_eps": 1e-3}
+
+_checkpoint(
+    "integration/dream-v0-instruct-7b",
+    "Dream-v0-Instruct-7B: full-canvas masked diffusion from Qwen2.5-7B.",
+    hf_model="Dream-org/Dream-v0-Instruct-7B",
+    revision="05334cb9fa",
+    license="apache-2.0",
+    prediction_field="shifted",
+    topology="bidirectional",
+    tokens={"mask_token_id": 151666, "eos_token_id": 151643,
+            "pad_token_id": 151643, "turn_end_token_id": 151645},
+    reference=_DREAM_REF,
+    extra=_DREAM_DECODING,
+)
+_checkpoint(
+    "integration/dream-coder-v0-instruct-7b",
+    "Dream-Coder-v0-Instruct-7B: Dream architecture from Qwen2.5-Coder-7B.",
+    hf_model="Dream-org/Dream-Coder-v0-Instruct-7B",
+    revision="5d9e88c723",
+    license="apache-2.0",
+    prediction_field="shifted",
+    topology="bidirectional",
+    tokens={"mask_token_id": 151666, "eos_token_id": 151643,
+            "pad_token_id": 151643, "turn_end_token_id": 151645,
+            "bos_token_id": 151665},
+    reference=_DREAM_REF,
+    extra=_DREAM_DECODING,
+)
+_checkpoint(
+    "integration/diffucoder-7b-instruct",
+    "DiffuCoder-7B-Instruct: Dream architecture, dedicated <|dlm_pad|> padding.",
+    hf_model="apple/DiffuCoder-7B-Instruct",
+    revision="4fdd458006",
+    license="apple-amlr",
+    prediction_field="shifted",
+    topology="bidirectional",
+    # config.json pad_token_id is 151643; the tokenizer's pad is <|dlm_pad|>
+    tokens={"mask_token_id": 151666, "eos_token_id": 151643,
+            "pad_token_id": 151667, "config_pad_token_id": 151643,
+            "turn_end_token_id": 151645},
+    reference="https://github.com/apple/ml-diffucoder",
+    extra=_DREAM_DECODING,
+)
+_checkpoint(
+    "integration/illada-8b-instruct",
+    "iLLaDA-8B-Instruct: masked diffusion trained from scratch (12T tokens).",
+    hf_model="GSAI-ML/iLLaDA-8B-Instruct",
+    revision="5769f04922",
+    license="apache-2.0",
+    prediction_field="same_position",
+    topology="bidirectional",
+    tokens={"mask_token_id": 5, "eos_token_id": 2, "pad_token_id": 1,
+            "bos_token_id": 0},
+    reference="https://github.com/ML-GSAI/LLaDA",
+)
+_checkpoint(
+    "integration/fast-dllm-v2-7b",
+    "Fast-dLLM v2 7B: block diffusion converted from Qwen2.5-7B-Instruct.",
+    hf_model="Efficient-Large-Model/Fast_dLLM_v2_7B",
+    revision="0661abf5f9",
+    license="apache-2.0",
+    prediction_field="shifted",
+    topology="block_causal",
+    block_length=32,
+    # config pad/eos is <|im_end|>; the tokenizer's pad is <|endoftext|>
+    tokens={"mask_token_id": 151665, "eos_token_id": 151645,
+            "pad_token_id": 151645, "tokenizer_pad_token_id": 151643},
+    reference="https://github.com/NVlabs/Fast-dLLM",
+    extra={"sub_block_length": 8, "sft_padding": "mask_ignored",
+           "complementary_mask": True},
+)
+_checkpoint(
+    "integration/sdar-8b-chat",
+    "SDAR-8B-Chat: block diffusion from Qwen3-8B (card licence apache-2.0, "
+    "GitHub MIT).",
+    hf_model="JetLM/SDAR-8B-Chat",
+    revision="ac4528d2c0",
+    license="apache-2.0",
+    prediction_field="same_position",
+    topology="block_causal",
+    block_length=4,
+    tokens={"mask_token_id": 151669, "eos_token_id": 151643,
+            "pad_token_id": 151643, "turn_end_token_id": 151645},
+    reference="https://github.com/JetAstra/SDAR",
+)
+_checkpoint(
+    "integration/trado-8b-instruct",
+    "TraDo-8B-Instruct: SDAR architecture with TraceRL post-training.",
+    hf_model="Gen-Verse/TraDo-8B-Instruct",
+    revision="2d37bd3ebb",
+    license="mit",
+    prediction_field="same_position",
+    topology="block_causal",
+    block_length=4,
+    tokens={"mask_token_id": 151669, "eos_token_id": 151643,
+            "pad_token_id": 151643, "turn_end_token_id": 151645},
+    reference="https://github.com/Gen-Verse/dLLM-RL",
+)
+_checkpoint(
+    "integration/nemotron-labs-diffusion-8b",
+    "Nemotron-Labs-Diffusion-8B: one set of weights for block diffusion, "
+    "AR and self-speculative decoding.",
+    hf_model="nvidia/Nemotron-Labs-Diffusion-8B",
+    revision="16c67f0560",
+    license="nvidia-nemotron-open-model-license",
+    prediction_field="same_position",
+    topology="block_causal",
+    block_length=32,
+    tokens={"mask_token_id": 100, "eos_token_id": 11, "bos_token_id": 1},
+    reference="https://github.com/NVlabs/Nemotron-Labs-Diffusion",
+    extra={"decoding_modes": ["block_diffusion", "autoregressive",
+                              "self_speculative"]},
+)
+
+
 # ------------------------- compatibility presets -------------------------- #
 
 _register(

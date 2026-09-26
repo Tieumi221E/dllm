@@ -173,9 +173,11 @@ def resolve_commit_policy(
             return QuotaCommitPolicy()
         if policy == "threshold":
             return ThresholdCommitPolicy(threshold=threshold)
+        if policy == "timestep_quota":
+            return TimestepQuotaCommitPolicy()
         raise ValueError(
             "commit must be 'transfer', 'quota', 'threshold', "
-            "or a CommitPolicy"
+            "'timestep_quota', or a CommitPolicy"
         )
     if isinstance(policy, CommitPolicy):
         return policy
